@@ -2,6 +2,10 @@
 
 Herramienta web para reunir animaciones de múltiples archivos FBX que comparten el mismo rig.
 
+## Abrir la herramienta
+
+**GitHub Pages:** https://acewalt.github.io/action_to_edit/
+
 ## Flujo
 
 1. Importa varios archivos **.fbx** a la vez.
