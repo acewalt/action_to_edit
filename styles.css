@@ -1310,3 +1310,233 @@ button { color: inherit; }
     justify-content: flex-end;
   }
 }
+
+
+/* ───────────── Retargeting · Bone Map / Redefine Rest Pose tabs ───────────── */
+.retarget-map-card {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.retarget-work-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: -2px 0 10px;
+  padding: 3px;
+  width: max-content;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0c1014;
+}
+.retarget-work-tab {
+  min-height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #7e8a95;
+  font-size: 8.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.retarget-work-tab:hover { color: #c8d0d7; }
+.retarget-work-tab.active {
+  background: #202730;
+  color: #f2f5f7;
+  box-shadow: inset 0 0 0 1px #35414d;
+}
+.retarget-work-pane {
+  min-height: 0;
+  overflow: hidden;
+}
+.retarget-work-pane.is-hidden { display: none; }
+#retargetBoneMapPane {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 0;
+}
+#retargetBoneMapPane.is-hidden { display: none; }
+
+.retarget-rest-editor-pane {
+  position: relative;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 8px;
+}
+.retarget-rest-editor-pane.is-hidden { display: none; }
+.retarget-rest-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.retarget-rest-editor-head > div:first-child {
+  min-width: 0;
+}
+.retarget-rest-editor-head strong {
+  display: block;
+  font-size: 11px;
+  color: #eef2f5;
+}
+.retarget-rest-editor-head span {
+  display: block;
+  max-width: 760px;
+  margin-top: 3px;
+  color: #788490;
+  font-size: 8px;
+  line-height: 1.4;
+}
+.retarget-rest-view-toggles {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-top: 1px;
+}
+.retarget-rest-view-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #9aa5af;
+  font-size: 8px;
+  white-space: nowrap;
+}
+.retarget-rest-view-toggles input { accent-color: #8faecc; }
+
+.retarget-rest-toolbar {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) auto 90px repeat(4, auto);
+  align-items: end;
+  gap: 7px;
+}
+.retarget-rest-bone-field {
+  min-width: 150px;
+}
+.retarget-rest-space-field {
+  width: 90px;
+}
+.retarget-rest-tool-group {
+  display: flex;
+  gap: 4px;
+}
+.retarget-tool-mode {
+  height: 32px;
+  min-width: 58px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: #171c22;
+  color: #a3adb6;
+  font-size: 8.5px;
+  cursor: pointer;
+}
+.retarget-tool-mode.active {
+  border-color: #596b7d;
+  background: #252d36;
+  color: #f4f7f9;
+}
+.retarget-use-rest-button {
+  border-color: #5d6d7d;
+  background: #232a31;
+  color: #f5f7f8;
+  font-weight: 650;
+}
+
+.retarget-rest-viewport {
+  position: relative;
+  min-height: 320px;
+  overflow: hidden;
+  border: 1px solid #2a333d;
+  border-radius: 9px;
+  background:
+    radial-gradient(circle at 50% 38%, rgba(88, 102, 118, .07), transparent 38%),
+    #0b0e12;
+}
+.retarget-rest-viewport canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  outline: 0;
+}
+.retarget-rest-help {
+  position: absolute;
+  z-index: 4;
+  left: 10px;
+  bottom: 10px;
+  width: min(320px, calc(100% - 20px));
+  padding: 8px 10px;
+  border: 1px solid rgba(78, 92, 105, .68);
+  border-radius: 7px;
+  background: rgba(12, 16, 20, .78);
+  pointer-events: none;
+  backdrop-filter: blur(5px);
+}
+.retarget-rest-help strong {
+  display: block;
+  color: #dbe1e6;
+  font-size: 8.5px;
+}
+.retarget-rest-help span {
+  display: block;
+  margin-top: 2px;
+  color: #7e8994;
+  font-size: 7.6px;
+  line-height: 1.35;
+}
+.retarget-rest-badge {
+  position: absolute;
+  z-index: 4;
+  top: 9px;
+  left: 9px;
+  padding: 5px 7px;
+  border: 1px solid #35404a;
+  border-radius: 999px;
+  background: rgba(12, 16, 20, .80);
+  color: #8d99a4;
+  font-size: 7.8px;
+  pointer-events: none;
+  backdrop-filter: blur(5px);
+}
+.retarget-rest-badge.active {
+  border-color: #60778d;
+  color: #dce8f2;
+}
+.retarget-rest-marker-label {
+  position: absolute;
+}
+
+@media (max-width: 1220px) {
+  .retarget-rest-toolbar {
+    grid-template-columns: minmax(160px, 1fr) auto 90px repeat(2, auto);
+  }
+  .retarget-use-rest-button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
+@media (max-width: 760px) {
+  .retarget-rest-editor-head {
+    display: block;
+  }
+  .retarget-rest-view-toggles {
+    margin-top: 7px;
+    flex-wrap: wrap;
+  }
+  .retarget-rest-toolbar {
+    grid-template-columns: 1fr 1fr;
+  }
+  .retarget-rest-bone-field,
+  .retarget-use-rest-button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .retarget-rest-space-field {
+    width: auto;
+  }
+  .retarget-rest-viewport {
+    min-height: 420px;
+  }
+}
