@@ -478,31 +478,13 @@ function makeClipForBase(record, baseAsset, usedNames = null) {
 
     if (parsed.propertyName === 'position') {
       retargetPositionTrack(track, sourceRest, baseRest, unitRatio);
+    } else if (parsed.propertyName === 'quaternion') {
+      // Keep the animation's original local rotation delta relative to its
+      // source rest pose, then apply that delta to the base rig rest pose.
+      // This is the version that preserved the Mixamo motion correctly.
+      retargetQuaternionTrack(track, sourceRest, baseRest);
     } else if (parsed.propertyName === 'scale') {
       retargetScaleTrack(track, sourceRest, baseRest);
-    }
-  }
-
-  // Rotation needs the whole hierarchy, not one bone at a time.
-  // SkeletonUtils evaluates parent/child world matrices frame by frame.
-  const hierarchicalRotationApplied =
-    replaceQuaternionTracksWithHierarchicalRetarget(record, baseAsset, clip);
-
-  if (!hierarchicalRotationApplied) {
-    // Fallback for unusual FBX files where a usable SkinnedMesh cannot be found.
-    for (const track of clip.tracks) {
-      let parsed;
-      try {
-        parsed = THREE.PropertyBinding.parseTrackName(track.name);
-      } catch {
-        continue;
-      }
-
-      if (parsed.propertyName !== 'quaternion') continue;
-
-      const sourceRest = sourceRestPose?.get(parsed.nodeName);
-      const baseRest = baseRestPose?.get(parsed.nodeName);
-      retargetQuaternionTrack(track, sourceRest, baseRest);
     }
   }
 
@@ -1049,6 +1031,21 @@ function buildCleanExportRoot(base, clips) {
   return exportRoot;
 }
 
+function applyFbxArmatureOrientationFix(exportRoot) {
+  // Blender/Unity FBX import was introducing an effective 180° Z orientation
+  // on the armature object. The user-confirmed manual fix was setting that
+  // armature Z rotation back by 180°. Apply the equivalent correction once,
+  // to the whole exported character, without changing individual bone curves.
+  const correction = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1),
+    Math.PI
+  );
+
+  exportRoot.quaternion.premultiply(correction);
+  exportRoot.updateMatrix();
+  exportRoot.updateMatrixWorld(true);
+}
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -1073,6 +1070,7 @@ async function exportFBX() {
 
   try {
     const exportRoot = buildCleanExportRoot(base, clips);
+    applyFbxArmatureOrientationFix(exportRoot);
     const exporter = new FBXExporter();
 
     // FBXLoader conserva las unidades numéricas del archivo de origen.
@@ -1095,7 +1093,7 @@ async function exportFBX() {
     downloadBlob(blob, filename);
 
     setStatus(
-      'FBX exportado con retarget de rest pose y unidad preservada (' +
+      'FBX exportado con retarget de rest pose, orientación Z corregida y unidad preservada (' +
       sourceUnitScale + '): ' + filename + ' · ' + clips.length + ' actions.',
       'ok'
     );
