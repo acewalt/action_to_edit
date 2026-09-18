@@ -405,6 +405,12 @@ export async function buildRetargetClip({
   const sourceNames = [...sourceBones.keys()];
   const targetNames = [...targetBones.keys()];
 
+  // BlendCap runs inside Blender, so mapping an FK control works because the
+  // target constraint/driver stack propagates that control to the deform
+  // skeleton. FBX + Three.js does NOT carry/evaluate that Blender rig graph.
+  // Resolve browser retarget outputs to bones that actually influence skin.
+  const weightedTargetBones = collectWeightedSkinBoneNames(targetRoot);
+
   const invalid = [];
   const runtimePairs = [];
 
@@ -421,12 +427,20 @@ export async function buildRetargetClip({
       continue;
     }
 
+    const effectiveTargetName = resolveBrowserBakeTarget({
+      requestedName: targetName,
+      pair,
+      targetBones,
+      weightedTargetBones,
+    });
+
     runtimePairs.push({
       ...pair,
       sourceName,
-      targetName,
+      requestedTargetName: targetName,
+      targetName: effectiveTargetName,
       sourceBone: sourceBones.get(sourceName),
-      targetBone: targetBones.get(targetName),
+      targetBone: targetBones.get(effectiveTargetName),
     });
   }
 
@@ -472,8 +486,14 @@ export async function buildRetargetClip({
   restoreAssetRest(targetRoot, targetAsset);
   const targetRest = captureBonePose(targetRoot);
 
-  const sourceHeight = computeRigHeightFromPose(sourceRest);
-  const targetHeight = computeRigHeightFromPose(targetRest);
+  const sourceHeight = computeRigHeightFromPose(
+    sourceRest,
+    new Set(runtimePairs.map((pair) => pair.sourceName))
+  );
+  const targetHeight = computeRigHeightFromPose(
+    targetRest,
+    new Set(runtimePairs.map((pair) => pair.targetName))
+  );
   const scaleRatio =
     autoScale && sourceHeight > 1e-8 && targetHeight > 1e-8
       ? targetHeight / sourceHeight
@@ -541,6 +561,8 @@ export async function buildRetargetClip({
 
       let nextLocalPosition = targetRestEntry.localPosition.clone();
       let desiredWorldQuaternion = null;
+      let worldLocationAccum = null;
+      let wroteWorldLocation = false;
 
       for (const pair of group) {
         const sourceBone = pair.sourceBone;
@@ -581,10 +603,13 @@ export async function buildRetargetClip({
         }
 
         if (hasLocationChannel(pair.channels)) {
-          const axes = normalizeAxes(pair.axes);
-          const locationScale = scaleRatio * (Number.isFinite(Number(pair.loc_scale)) ? Number(pair.loc_scale) : 1);
+          const axes = blenderAxesToThreeWorld(pair.axes);
+          const pairScale =
+            Number.isFinite(Number(pair.loc_scale))
+              ? Number(pair.loc_scale)
+              : 1;
 
-          let candidateLocal = targetRestEntry.localPosition.clone();
+          let worldContribution = new THREE.Vector3();
 
           if (
             pair.anchor &&
@@ -593,78 +618,123 @@ export async function buildRetargetClip({
             sourceHeadRest &&
             targetHeadRest
           ) {
+            // HEAD_LOCAL stays head-relative by design.
             const sourceBoneWorld = new THREE.Vector3();
             sourceBone.getWorldPosition(sourceBoneWorld);
 
-            const currentSourceHeadInv = sourceHead.matrixWorld.clone().invert();
-            const sourceCurrentHeadLocal = sourceBoneWorld.clone().applyMatrix4(currentSourceHeadInv);
-            const sourceRestHeadLocal = sourceRestEntry.worldPosition
-              .clone()
-              .applyMatrix4(sourceHeadRest.worldMatrix.clone().invert());
+            const currentSourceHeadInv =
+              sourceHead.matrixWorld.clone().invert();
 
-            const motion = sourceCurrentHeadLocal.sub(sourceRestHeadLocal);
-            applyAxesMask(motion, axes);
-            motion.multiplyScalar(locationScale);
+            const sourceCurrentHeadLocal =
+              sourceBoneWorld.clone().applyMatrix4(currentSourceHeadInv);
 
-            const correction = targetHeadRest.worldQuaternion
-              .clone()
-              .invert()
-              .multiply(sourceHeadRest.worldQuaternion)
-              .normalize();
+            const sourceRestHeadLocal =
+              sourceRestEntry.worldPosition
+                .clone()
+                .applyMatrix4(sourceHeadRest.worldMatrix.clone().invert());
+
+            const motion =
+              sourceCurrentHeadLocal.sub(sourceRestHeadLocal);
+
+            applyAxesMask(motion, normalizeAxes(pair.axes));
+            motion.multiplyScalar(scaleRatio * pairScale);
+
+            const correction =
+              targetHeadRest.worldQuaternion
+                .clone()
+                .invert()
+                .multiply(sourceHeadRest.worldQuaternion)
+                .normalize();
+
             motion.applyQuaternion(correction);
 
-            const targetRestHeadLocal = targetRestEntry.worldPosition
-              .clone()
-              .applyMatrix4(targetHeadRest.worldMatrix.clone().invert());
+            const targetRestHeadLocal =
+              targetRestEntry.worldPosition
+                .clone()
+                .applyMatrix4(targetHeadRest.worldMatrix.clone().invert());
 
-            const desiredHeadLocal = targetRestHeadLocal.add(motion);
-            const desiredWorld = desiredHeadLocal.applyMatrix4(targetHead.matrixWorld);
+            const desiredHeadLocal =
+              targetRestHeadLocal.add(motion);
 
-            candidateLocal = targetBone.parent
+            const desiredWorld =
+              desiredHeadLocal.applyMatrix4(targetHead.matrixWorld);
+
+            const candidateLocal = targetBone.parent
               ? targetBone.parent.worldToLocal(desiredWorld.clone())
               : desiredWorld;
-          } else if (useWorldLocation) {
-            const sourceWorld = new THREE.Vector3();
-            sourceBone.getWorldPosition(sourceWorld);
-            const worldDelta = sourceWorld.sub(sourceRestEntry.worldPosition);
-            applyAxesMask(worldDelta, axes);
-            worldDelta.multiplyScalar(locationScale);
 
-            const desiredWorld = targetRestEntry.worldPosition.clone().add(worldDelta);
-            candidateLocal = targetBone.parent
-              ? targetBone.parent.worldToLocal(desiredWorld.clone())
-              : desiredWorld;
+            if (pair.influence < 0.999999) {
+              candidateLocal.lerp(
+                targetRestEntry.localPosition,
+                1 - pair.influence
+              );
+            }
+
+            nextLocalPosition.copy(candidateLocal);
           } else {
-            const localDelta = sourceBone.position
-              .clone()
-              .sub(sourceRestEntry.localPosition);
+            if (useWorldLocation) {
+              const sourceWorld = new THREE.Vector3();
+              sourceBone.getWorldPosition(sourceWorld);
 
-            const sourceParentQ = sourceRestEntry.parentWorldQuaternion.clone();
-            const targetParentInvQ = targetRestEntry.parentWorldQuaternion.clone().invert();
+              worldContribution
+                .copy(sourceWorld)
+                .sub(sourceRestEntry.worldPosition)
+                .multiplyScalar(scaleRatio * pairScale);
+            } else {
+              // Three.js bone.position is parent-local. Lift that delta into
+              // world using the SOURCE REST parent frame, filter world axes,
+              // then project into the TARGET REST parent frame. This is the
+              // browser equivalent of BlendCap's world-component BASIS bake.
+              worldContribution
+                .copy(sourceBone.position)
+                .sub(sourceRestEntry.localPosition)
+                .applyQuaternion(sourceRestEntry.parentWorldQuaternion)
+                .multiplyScalar(scaleRatio * pairScale);
+            }
 
-            localDelta
-              .applyQuaternion(sourceParentQ)
-              .multiplyScalar(locationScale)
-              .applyQuaternion(targetParentInvQ);
+            applyAxesMask(worldContribution, axes);
 
-            applyAxesMask(localDelta, axes);
+            if (pair.influence < 0.999999) {
+              worldContribution.multiplyScalar(pair.influence);
+            }
 
-            candidateLocal = targetRestEntry.localPosition.clone();
-            if (axes.includes('X')) candidateLocal.x += localDelta.x;
-            if (axes.includes('Y')) candidateLocal.y += localDelta.y;
-            if (axes.includes('Z')) candidateLocal.z += localDelta.z;
+            if (!worldLocationAccum) {
+              worldLocationAccum = new THREE.Vector3();
+            }
+
+            // BlendCap treats partial axes as WORLD components. Multiple
+            // split-axis rows targeting the same effective deform bone compose.
+            if (axes.includes('X')) {
+              worldLocationAccum.x = worldContribution.x;
+              wroteWorldLocation = true;
+            }
+            if (axes.includes('Y')) {
+              worldLocationAccum.y = worldContribution.y;
+              wroteWorldLocation = true;
+            }
+            if (axes.includes('Z')) {
+              worldLocationAccum.z = worldContribution.z;
+              wroteWorldLocation = true;
+            }
           }
-
-          if (pair.influence < 0.999999) {
-            candidateLocal = targetRestEntry.localPosition
-              .clone()
-              .lerp(candidateLocal, pair.influence);
-          }
-
-          if (axes.includes('X')) nextLocalPosition.x = candidateLocal.x;
-          if (axes.includes('Y')) nextLocalPosition.y = candidateLocal.y;
-          if (axes.includes('Z')) nextLocalPosition.z = candidateLocal.z;
         }
+      }
+
+      if (wroteWorldLocation && worldLocationAccum) {
+        const parentRestInv =
+          targetRestEntry.parentWorldQuaternion
+            .clone()
+            .invert();
+
+        const localDelta =
+          worldLocationAccum
+            .clone()
+            .applyQuaternion(parentRestInv);
+
+        nextLocalPosition =
+          targetRestEntry.localPosition
+            .clone()
+            .add(localDelta);
       }
 
       if (group.some((pair) => hasLocationChannel(pair.channels))) {
@@ -758,6 +828,14 @@ export async function buildRetargetClip({
       sourceHead: resolvedHeadSource,
       targetHead: resolvedHeadTarget,
       mappedBones: targetOrder,
+      redirectedPairs: runtimePairs
+        .filter((pair) => pair.requestedTargetName !== pair.targetName)
+        .map((pair) => ({
+          source: pair.sourceName,
+          requestedTarget: pair.requestedTargetName,
+          bakedTarget: pair.targetName,
+        })),
+      weightedTargetBoneCount: weightedTargetBones.size,
     },
   };
 }
@@ -999,11 +1077,192 @@ function boneMap(root) {
   return map;
 }
 
-function computeRigHeightFromPose(pose) {
+function collectWeightedSkinBoneNames(root) {
+  const weighted = new Set();
+  const fallback = new Set();
+
+  root?.traverse((node) => {
+    if (!node.isSkinnedMesh || !node.skeleton) return;
+
+    const bones = node.skeleton.bones || [];
+    for (const bone of bones) {
+      if (bone?.name) fallback.add(bone.name);
+    }
+
+    const skinIndex = node.geometry?.getAttribute?.('skinIndex');
+    const skinWeight = node.geometry?.getAttribute?.('skinWeight');
+
+    if (!skinIndex || !skinWeight) return;
+
+    const indexArray = skinIndex.array;
+    const weightArray = skinWeight.array;
+    const count = Math.min(indexArray.length, weightArray.length);
+
+    for (let i = 0; i < count; i++) {
+      if (Number(weightArray[i]) <= 1e-6) continue;
+
+      const boneIndex = Number(indexArray[i]) | 0;
+      const bone = bones[boneIndex];
+
+      if (bone?.name) weighted.add(bone.name);
+    }
+  });
+
+  return weighted.size ? weighted : fallback;
+}
+
+function resolveBrowserBakeTarget({
+  requestedName,
+  pair,
+  targetBones,
+  weightedTargetBones,
+}) {
+  if (
+    !requestedName ||
+    !targetBones?.has(requestedName) ||
+    !weightedTargetBones?.size
+  ) {
+    return requestedName;
+  }
+
+  // If the preset already points at a real skinning bone, keep it.
+  if (weightedTargetBones.has(requestedName)) {
+    return requestedName;
+  }
+
+  const requestedBone = targetBones.get(requestedName);
+  const requestedCompact =
+    normalizeExactBoneName(requestedName);
+
+  let wantedSemantic = semanticBoneKey(requestedName);
+
+  // CloudRig's Blender controls rely on constraints. In the browser we bake
+  // straight to the corresponding deform role.
+  if (/hipspine/.test(requestedCompact)) {
+    wantedSemantic = 'hips';
+  } else if (
+    /torsospine/.test(requestedCompact) &&
+    hasLocationChannel(pair.channels)
+  ) {
+    wantedSemantic = 'hips';
+  }
+
+  // Locomotion rows should move the deform pelvis/root, not an FK helper.
+  if (
+    hasLocationChannel(pair.channels) &&
+    (wantedSemantic === 'root' ||
+      wantedSemantic === 'hips')
+  ) {
+    const motionRoot =
+      findWeightedMotionRoot(targetBones, weightedTargetBones);
+
+    if (motionRoot) return motionRoot;
+  }
+
+  const requestedPos = new THREE.Vector3();
+  requestedBone.getWorldPosition(requestedPos);
+
+  const candidates = [];
+
+  for (const name of weightedTargetBones) {
+    const bone = targetBones.get(name);
+    if (!bone) continue;
+
+    const semantic = semanticBoneKey(name);
+
+    const spineFamily =
+      ['hips', 'spine', 'spine1', 'spine2', 'spine3', 'chest'];
+
+    const semanticMatch =
+      semantic === wantedSemantic ||
+      (
+        spineFamily.includes(wantedSemantic) &&
+        spineFamily.includes(semantic) &&
+        (
+          /hipspine|torsospine/.test(requestedCompact)
+        )
+      );
+
+    if (!semanticMatch) continue;
+
+    const pos = new THREE.Vector3();
+    bone.getWorldPosition(pos);
+
+    let score = 0;
+    const lower = name.toLowerCase();
+
+    if (/^def[-_:]?/.test(lower)) score += 100;
+    if (/deform/.test(lower)) score += 70;
+    if (/^fk[-_:]?/.test(lower)) score -= 40;
+    if (
+      /(mch|org|ctrl|control|pole|target|ik[-_:]|hng|hanger|twist|tweak|roll)/
+        .test(lower)
+    ) {
+      score -= 100;
+    }
+
+    // Same anatomical role wins; rest-position proximity separates multiple
+    // spine levels without hard-coding a specific CloudRig skeleton.
+    if (semantic === wantedSemantic) score += 80;
+    score -= requestedPos.distanceTo(pos);
+
+    candidates.push({ name, score });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  return candidates[0]?.name || requestedName;
+}
+
+function findWeightedMotionRoot(targetBones, weightedTargetBones) {
+  const weighted = [...weightedTargetBones]
+    .map((name) => targetBones.get(name))
+    .filter(Boolean);
+
+  const hips = weighted.filter((bone) => {
+    const semantic = semanticBoneKey(bone.name);
+    return semantic === 'hips' || semantic === 'root';
+  });
+
+  const pool = hips.length ? hips : weighted;
+
+  pool.sort((a, b) => {
+    const aScore =
+      (semanticBoneKey(a.name) === 'hips' ? -100 : 0) +
+      boneDepth(a);
+
+    const bScore =
+      (semanticBoneKey(b.name) === 'hips' ? -100 : 0) +
+      boneDepth(b);
+
+    return aScore - bScore;
+  });
+
+  return pool[0]?.name || '';
+}
+
+function blenderAxesToThreeWorld(value) {
+  // BlendCap presets are authored in Blender world axes (Z-up):
+  // Blender X -> Three X
+  // Blender Y -> Three Z
+  // Blender Z -> Three Y
+  const axes = normalizeAxes(value);
+  let out = '';
+
+  if (axes.includes('X')) out += 'X';
+  if (axes.includes('Z')) out += 'Y';
+  if (axes.includes('Y')) out += 'Z';
+
+  return normalizeAxes(out);
+}
+
+function computeRigHeightFromPose(pose, includedNames = null) {
   let minY = Infinity;
   let maxY = -Infinity;
 
-  for (const entry of pose.values()) {
+  for (const [name, entry] of pose) {
+    if (includedNames && !includedNames.has(name)) continue;
+
     minY = Math.min(minY, entry.worldPosition.y);
     maxY = Math.max(maxY, entry.worldPosition.y);
   }
