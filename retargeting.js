@@ -880,11 +880,27 @@ function restoreHierarchySnapshot(root, snapshot) {
 function restoreAssetRest(root, asset) {
   if (!root || !asset) return;
 
-  if (restoreHierarchySnapshot(root, asset.restHierarchy)) {
-    return;
+  // Restore root/object transforms, then derive the real static bind pose from
+  // the FBX inverse bind matrices. This prevents a first-frame/current Action
+  // pose from becoming the retarget baseline.
+  restoreHierarchySnapshot(root, asset.restHierarchy);
+
+  const skeletons = new Set();
+  root.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      skeletons.add(node.skeleton);
+    }
+  });
+
+  for (const skeleton of skeletons) {
+    skeleton.pose();
   }
 
-  applyRestPose(root, asset.restPose);
+  root.updateMatrixWorld(true);
+
+  for (const skeleton of skeletons) {
+    skeleton.update();
+  }
 }
 
 function applyRestPose(object, restPose) {
