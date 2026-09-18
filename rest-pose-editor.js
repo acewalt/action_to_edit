@@ -135,6 +135,7 @@ export class RestPoseEditor {
     this.sourceBones = new Map();
     this.targetBones = new Map();
     this.sourceRestWorldQuaternions = new Map();
+    this.sourceBindLocalPose = new Map();
     this.ikHandles = [];
     this.activeIkHandle = null;
 
@@ -395,6 +396,8 @@ export class RestPoseEditor {
     this.sourceGroup.updateMatrixWorld(true);
     this.sourceRestWorldQuaternions =
       captureWorldQuaternions(this.sourceBones);
+    this.sourceBindLocalPose =
+      captureLocalBonePose(this.sourceBones);
 
     if (poseOverride) {
       applyBonePoseOverride(this.sourceRoot, poseOverride);
@@ -631,14 +634,13 @@ export class RestPoseEditor {
   resetSelectedBone() {
     if (
       !this.selectedBoneName ||
-      !this.sourceAsset?.restPose ||
       !this.sourceRoot
     ) {
       return;
     }
 
     const bone = this.sourceBones.get(this.selectedBoneName);
-    const rest = this.sourceAsset.restPose.get(this.selectedBoneName);
+    const rest = this.sourceBindLocalPose.get(this.selectedBoneName);
 
     if (!bone || !rest) return;
 
@@ -1692,6 +1694,20 @@ function collectBones(root) {
   });
 
   return map;
+}
+
+function captureLocalBonePose(bones) {
+  const result = new Map();
+
+  for (const [name, bone] of bones) {
+    result.set(name, {
+      position: bone.position.clone(),
+      quaternion: bone.quaternion.clone(),
+      scale: bone.scale.clone(),
+    });
+  }
+
+  return result;
 }
 
 function captureWorldQuaternions(bones) {
