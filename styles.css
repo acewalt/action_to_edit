@@ -474,6 +474,16 @@ button { color: inherit; }
   color: var(--muted);
   font-size: 8.5px;
 }
+.limb-gizmo-button {
+  width: 100%;
+  margin: 2px 0 5px;
+}
+.limb-gizmo-button.active {
+  border-color: #2f8f62;
+  background: rgba(46, 160, 103, .16);
+  color: #88e0b3;
+}
+
 .limb-stretch-check {
   margin-top: 7px;
   margin-bottom: 3px;
