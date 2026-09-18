@@ -370,6 +370,9 @@ export async function buildRetargetClip({
   headSource = '',
   headTarget = '',
   clipName = 'Retargeted',
+  autoBakeIk = false,
+  ikChains = [],
+  customIkSources = null,
   onProgress = null,
 }) {
   if (!sourceAsset?.object || !targetAsset?.object || !sourceClip) {
@@ -491,6 +494,26 @@ export async function buildRetargetClip({
 
   restoreAssetRest(targetRoot, targetAsset);
   const targetRest = captureBonePose(targetRoot);
+
+  // BlendCap FK->IK is a SECOND bake. It samples the already-retargeted target
+  // FK chain, puts the IK end control on the chain-end delta-from-rest, and
+  // computes the pole from the posed target chain geometry. In the browser our
+  // direct-deform chain is the FK proxy because Blender constraints/drivers are
+  // not evaluated by Three.js.
+  const ikBake = autoBakeIk
+    ? buildBlendCapIkBakeChains({
+        ikChains,
+        customIkSources,
+        runtimePairs,
+        targetBones,
+        targetNames,
+        targetPrefix,
+        targetRest,
+      })
+    : {
+        chains: [],
+        skipped: [],
+      };
 
   const sourceHeight = computeRigHeightFromPose(
     sourceRest,
@@ -798,6 +821,14 @@ export async function buildRetargetClip({
       }
     }
 
+    if (ikBake.chains.length) {
+      targetRoot.updateMatrixWorld(true);
+      sampleBlendCapIkBakeChains(
+        ikBake.chains,
+        targetRest
+      );
+    }
+
     if (typeof onProgress === 'function') {
       onProgress((sampleIndex + 1) / sampleTimes.length, sampleIndex + 1, sampleTimes.length);
       if ((sampleIndex & 7) === 7) {
@@ -826,6 +857,14 @@ export async function buildRetargetClip({
         row.positionValues
       ));
     }
+  }
+
+  if (ikBake.chains.length) {
+    appendBlendCapIkTracks(
+      tracks,
+      ikBake.chains,
+      sampleTimes
+    );
   }
 
   if (!tracks.length) {
@@ -920,8 +959,519 @@ export async function buildRetargetClip({
       weightedTargetBoneCount: weightedTargetBones.size,
       influentialTargetBoneCount: influentialTargetBones.size,
       restBaselineBoneCount: influentialTargetBones.size,
+      ikBakedChains: ikBake.chains.length,
+      ikSkippedChains: ikBake.skipped,
     },
   };
+}
+
+function resolveControlBoneName(
+  requested,
+  targetNames,
+  prefix = ''
+) {
+  if (!requested) return '';
+
+  const names = targetNames || [];
+  const set = new Set(names);
+
+  if (set.has(requested)) return requested;
+  if (prefix && set.has(prefix + requested)) {
+    return prefix + requested;
+  }
+
+  const lower = String(requested).toLowerCase();
+  const directCase = names.find(
+    (name) => String(name).toLowerCase() === lower
+  );
+  if (directCase) return directCase;
+
+  if (prefix) {
+    const prefixed = (prefix + requested).toLowerCase();
+    const prefixedCase = names.find(
+      (name) => String(name).toLowerCase() === prefixed
+    );
+    if (prefixedCase) return prefixedCase;
+  }
+
+  // FBXLoader sanitizes "." and ":" from binding names.
+  const key = normalizeExactBoneName(requested);
+
+  return (
+    names.find((name) =>
+      normalizeExactBoneName(stripPrefix(name, prefix)) === key ||
+      normalizeExactBoneName(name) === key
+    ) || ''
+  );
+}
+
+function runtimePairForSourceRole(
+  runtimePairs,
+  requestedSource,
+  fallbackSemantic
+) {
+  const requestedKey = normalizeExactBoneName(requestedSource);
+  const semantic =
+    semanticBoneKey(requestedSource) ||
+    fallbackSemantic;
+
+  let pair = null;
+
+  if (requestedKey) {
+    pair = runtimePairs.find((entry) =>
+      normalizeExactBoneName(entry.sourceName) === requestedKey ||
+      normalizeExactBoneName(entry.source) === requestedKey
+    ) || null;
+  }
+
+  if (!pair && semantic) {
+    pair = runtimePairs.find((entry) =>
+      semanticBoneKey(entry.sourceName) === semantic ||
+      semanticBoneKey(entry.source) === semantic
+    ) || null;
+  }
+
+  if (!pair && fallbackSemantic) {
+    pair = runtimePairs.find((entry) =>
+      semanticBoneKey(entry.sourceName) === fallbackSemantic ||
+      semanticBoneKey(entry.source) === fallbackSemantic
+    ) || null;
+  }
+
+  return pair;
+}
+
+function buildBlendCapIkBakeChains({
+  ikChains,
+  customIkSources,
+  runtimePairs,
+  targetBones,
+  targetNames,
+  targetPrefix,
+  targetRest,
+}) {
+  const chains = [];
+  const skipped = [];
+
+  const custom = customIkSources || {};
+  const useCustom = Boolean(custom.enabled);
+
+  const defaults = {
+    left_hand: 'LeftHand',
+    right_hand: 'RightHand',
+    left_foot: 'LeftFoot',
+    right_foot: 'RightFoot',
+    left_forearm: 'LeftForeArm',
+    right_forearm: 'RightForeArm',
+    left_shin: 'LeftLeg',
+    right_shin: 'RightLeg',
+  };
+
+  for (const row of ikChains || []) {
+    const kind = String(row?.limb_kind || '').toUpperCase();
+    const side = String(row?.side || '').toUpperCase();
+
+    if (
+      !['ARM', 'LEG'].includes(kind) ||
+      !['L', 'R'].includes(side)
+    ) {
+      continue;
+    }
+
+    const sideWord = side === 'L' ? 'left' : 'right';
+
+    const endField =
+      kind === 'ARM'
+        ? sideWord + '_hand'
+        : sideWord + '_foot';
+
+    const midField =
+      kind === 'ARM'
+        ? sideWord + '_forearm'
+        : sideWord + '_shin';
+
+    const endSource =
+      (useCustom && custom[endField]) ||
+      defaults[endField];
+
+    const midSource =
+      (useCustom && custom[midField]) ||
+      defaults[midField];
+
+    const rootSemantic =
+      sideWord +
+      (kind === 'ARM' ? 'upperarm' : 'thigh');
+
+    const endSemantic =
+      sideWord +
+      (kind === 'ARM' ? 'hand' : 'foot');
+
+    const midSemantic =
+      sideWord +
+      (kind === 'ARM' ? 'forearm' : 'shin');
+
+    const endPair = runtimePairForSourceRole(
+      runtimePairs,
+      endSource,
+      endSemantic
+    );
+
+    const midPair = runtimePairForSourceRole(
+      runtimePairs,
+      midSource,
+      midSemantic
+    );
+
+    const rootPair = runtimePairForSourceRole(
+      runtimePairs,
+      '',
+      rootSemantic
+    );
+
+    const ikName = resolveControlBoneName(
+      row.ik_control,
+      targetNames,
+      targetPrefix
+    );
+
+    const poleName = resolveControlBoneName(
+      row.pole_control,
+      targetNames,
+      targetPrefix
+    );
+
+    const label = kind + ' ' + side;
+
+    if (!endPair?.targetName || !ikName) {
+      skipped.push(
+        label +
+        ': falta FK end o IK control.'
+      );
+      continue;
+    }
+
+    const endBone =
+      targetBones.get(endPair.targetName);
+
+    const ikBone =
+      targetBones.get(ikName);
+
+    const endRest =
+      targetRest.get(endPair.targetName);
+
+    const ikRest =
+      targetRest.get(ikName);
+
+    if (!endBone || !ikBone || !endRest || !ikRest) {
+      skipped.push(
+        label +
+        ': cadena/end control no resolvió en el Target.'
+      );
+      continue;
+    }
+
+    const chain = {
+      label,
+      kind,
+      side,
+      endName: endPair.targetName,
+      midName: midPair?.targetName || '',
+      rootName: rootPair?.targetName || '',
+      ikName,
+      poleName,
+      endBone,
+      midBone: midPair?.targetName
+        ? targetBones.get(midPair.targetName) || null
+        : null,
+      rootBone: rootPair?.targetName
+        ? targetBones.get(rootPair.targetName) || null
+        : null,
+      ikBone,
+      poleBone: poleName
+        ? targetBones.get(poleName) || null
+        : null,
+      endRestWorld: endRest.worldMatrix.clone(),
+      endRestWorldInv: endRest.worldMatrix.clone().invert(),
+      ikRestWorld: ikRest.worldMatrix.clone(),
+      ikPositionValues: [],
+      ikQuaternionValues: [],
+      polePositionValues: [],
+      previousIkQuaternion: null,
+      previousPerp: null,
+      fallbackPerp: null,
+    };
+
+    if (
+      chain.rootBone &&
+      chain.midBone &&
+      chain.poleBone
+    ) {
+      const rootRest =
+        targetRest.get(chain.rootName);
+      const midRest =
+        targetRest.get(chain.midName);
+
+      if (rootRest && midRest) {
+        const poleSeed = computeBlendCapPolePosition(
+          rootRest.worldPosition,
+          midRest.worldPosition,
+          endRest.worldPosition,
+          new THREE.Vector3(0, 0, 1),
+          null
+        );
+
+        chain.fallbackPerp =
+          poleSeed.perp?.clone() ||
+          new THREE.Vector3(0, 0, 1);
+        chain.previousPerp =
+          poleSeed.perp?.clone() ||
+          null;
+      }
+    }
+
+    chains.push(chain);
+  }
+
+  return { chains, skipped };
+}
+
+function computeBlendCapPolePosition(
+  rootHead,
+  midHead,
+  endHead,
+  fallbackAxis,
+  previousPerp
+) {
+  const chainVec =
+    endHead.clone().sub(rootHead);
+
+  if (chainVec.lengthSq() < 1e-12) {
+    return {
+      position:
+        midHead
+          .clone()
+          .addScaledVector(fallbackAxis, 0.1),
+      perp: null,
+    };
+  }
+
+  const lowerVec =
+    endHead.clone().sub(midHead);
+
+  const projected =
+    chainVec
+      .clone()
+      .multiplyScalar(
+        lowerVec.dot(chainVec) /
+        chainVec.lengthSq()
+      );
+
+  let perp =
+    projected.sub(lowerVec);
+
+  let usedFallback = false;
+
+  if (perp.length() < 1e-4) {
+    perp = fallbackAxis.clone();
+
+    const projection =
+      chainVec
+        .clone()
+        .multiplyScalar(
+          perp.dot(chainVec) /
+          chainVec.lengthSq()
+        );
+
+    perp.sub(projection);
+
+    if (perp.lengthSq() < 1e-12) {
+      perp.set(0, 1, 0);
+
+      const projection2 =
+        chainVec
+          .clone()
+          .multiplyScalar(
+            perp.dot(chainVec) /
+            chainVec.lengthSq()
+          );
+
+      perp.sub(projection2);
+    }
+
+    usedFallback = true;
+  }
+
+  if (perp.lengthSq() < 1e-12) {
+    return {
+      position: midHead.clone(),
+      perp: null,
+    };
+  }
+
+  perp.normalize();
+
+  if (
+    previousPerp &&
+    perp.dot(previousPerp) < 0
+  ) {
+    perp.negate();
+  }
+
+  const position =
+    midHead
+      .clone()
+      .addScaledVector(
+        perp,
+        chainVec.length() * 0.4
+      );
+
+  return {
+    position,
+    perp: usedFallback ? null : perp,
+  };
+}
+
+function sampleBlendCapIkBakeChains(
+  chains,
+  targetRest
+) {
+  const worldPos = new THREE.Vector3();
+  const worldQuat = new THREE.Quaternion();
+  const worldScale = new THREE.Vector3();
+
+  for (const chain of chains) {
+    const desiredWorld =
+      chain.endBone.matrixWorld
+        .clone()
+        .multiply(chain.endRestWorldInv)
+        .multiply(chain.ikRestWorld);
+
+    const parentInv =
+      chain.ikBone.parent
+        ? chain.ikBone.parent.matrixWorld
+            .clone()
+            .invert()
+        : new THREE.Matrix4();
+
+    const local =
+      parentInv.multiply(desiredWorld);
+
+    const p = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    const sc = new THREE.Vector3();
+
+    local.decompose(p, q, sc);
+    q.normalize();
+
+    if (
+      chain.previousIkQuaternion &&
+      chain.previousIkQuaternion.dot(q) < 0
+    ) {
+      q.set(-q.x, -q.y, -q.z, -q.w);
+    }
+
+    chain.previousIkQuaternion = q.clone();
+
+    chain.ikPositionValues.push(
+      p.x,
+      p.y,
+      p.z
+    );
+
+    chain.ikQuaternionValues.push(
+      q.x,
+      q.y,
+      q.z,
+      q.w
+    );
+
+    if (
+      chain.rootBone &&
+      chain.midBone &&
+      chain.poleBone
+    ) {
+      const rootPos = new THREE.Vector3();
+      const midPos = new THREE.Vector3();
+      const endPos = new THREE.Vector3();
+
+      chain.rootBone.getWorldPosition(rootPos);
+      chain.midBone.getWorldPosition(midPos);
+      chain.endBone.getWorldPosition(endPos);
+
+      const pole = computeBlendCapPolePosition(
+        rootPos,
+        midPos,
+        endPos,
+        chain.fallbackPerp ||
+          new THREE.Vector3(0, 0, 1),
+        chain.previousPerp
+      );
+
+      if (pole.perp) {
+        chain.previousPerp =
+          pole.perp.clone();
+      }
+
+      const poleParentInv =
+        chain.poleBone.parent
+          ? chain.poleBone.parent.matrixWorld
+              .clone()
+              .invert()
+          : new THREE.Matrix4();
+
+      const localPole =
+        pole.position
+          .clone()
+          .applyMatrix4(poleParentInv);
+
+      chain.polePositionValues.push(
+        localPole.x,
+        localPole.y,
+        localPole.z
+      );
+    }
+  }
+}
+
+function appendBlendCapIkTracks(
+  tracks,
+  chains,
+  sampleTimes
+) {
+  for (const chain of chains) {
+    if (chain.ikPositionValues.length) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(
+          chain.ikName + '.position',
+          sampleTimes,
+          chain.ikPositionValues
+        )
+      );
+    }
+
+    if (chain.ikQuaternionValues.length) {
+      tracks.push(
+        new THREE.QuaternionKeyframeTrack(
+          chain.ikName + '.quaternion',
+          sampleTimes,
+          chain.ikQuaternionValues
+        )
+      );
+    }
+
+    if (
+      chain.poleName &&
+      chain.polePositionValues.length
+    ) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(
+          chain.poleName + '.position',
+          sampleTimes,
+          chain.polePositionValues
+        )
+      );
+    }
+  }
 }
 
 function mergeRotationOnlyRest(originalPose, sampledPose) {
@@ -1042,50 +1592,42 @@ function restoreHierarchySnapshot(root, snapshot) {
 function restoreAssetRest(root, asset) {
   if (!root || !asset) return;
 
-  // Restore root/object transforms, then derive the real static bind pose from
-  // the FBX inverse bind matrices. This prevents a first-frame/current Action
-  // pose from becoming the retarget baseline.
-  restoreHierarchySnapshot(root, asset.restHierarchy);
+  // Blender retargeting works from the armature's edit/rest hierarchy, not
+  // from a reconstruction of the mesh inverse-bind matrices. FBX control rigs
+  // can legitimately have skin bind space that differs from the transforms
+  // their Actions were authored against. The exact FBXLoader import snapshot
+  // is therefore our authoritative animation rest.
+  const restored = restoreHierarchySnapshot(
+    root,
+    asset.restHierarchy
+  );
 
-  const skeletons = new Set();
-  root.traverse((node) => {
-    if (node.isSkinnedMesh && node.skeleton) {
-      skeletons.add(node.skeleton);
-    }
-  });
-
-  for (const skeleton of skeletons) {
-    skeleton.pose();
+  if (!restored && asset.restPose) {
+    applyRestPose(root, asset.restPose);
   }
 
   root.updateMatrixWorld(true);
 
-  for (const skeleton of skeletons) {
-    skeleton.update();
-  }
+  root.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.update();
+    }
+  });
 }
 
 function applyRestPose(object, restPose) {
-  if (!object) return;
+  if (!object || !restPose) return;
 
   object.traverse((node) => {
-    if (node.isSkinnedMesh && node.skeleton) {
-      node.skeleton.pose();
-    }
+    if (!node.isBone || !node.name) return;
+
+    const rest = restPose.get(node.name);
+    if (!rest) return;
+
+    node.position.copy(rest.position);
+    node.quaternion.copy(rest.quaternion);
+    node.scale.copy(rest.scale);
   });
-
-  if (restPose) {
-    object.traverse((node) => {
-      if (!node.isBone || !node.name) return;
-
-      const rest = restPose.get(node.name);
-      if (!rest) return;
-
-      node.position.copy(rest.position);
-      node.quaternion.copy(rest.quaternion);
-      node.scale.copy(rest.scale);
-    });
-  }
 
   object.updateMatrixWorld(true);
 
