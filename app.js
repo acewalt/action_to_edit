@@ -976,16 +976,25 @@ function roundOffsetValue(value, step) {
   return Math.abs(rounded) < 1e-9 ? 0 : Number(rounded.toFixed(4));
 }
 
-function updateRootOffsetFields(edit) {
+function cleanLiveNumber(value, decimals = 3) {
+  const n = Number(value) || 0;
+  if (Math.abs(n) < 1e-8) return 0;
+  return Number(n.toFixed(decimals));
+}
+
+function updateRootOffsetFields(edit, { live = false } = {}) {
   if (!edit) return;
 
-  els.rootOffsetX.value = String(edit.rootOffset?.x ?? 0);
-  els.rootOffsetY.value = String(edit.rootOffset?.y ?? 0);
-  els.rootOffsetZ.value = String(edit.rootOffset?.z ?? 0);
+  const posDecimals = live ? 3 : 4;
+  const rotDecimals = live ? 2 : 4;
 
-  els.rootRotationX.value = String(edit.rootRotation?.x ?? 0);
-  els.rootRotationY.value = String(edit.rootRotation?.y ?? 0);
-  els.rootRotationZ.value = String(edit.rootRotation?.z ?? 0);
+  els.rootOffsetX.value = String(cleanLiveNumber(edit.rootOffset?.x, posDecimals));
+  els.rootOffsetY.value = String(cleanLiveNumber(edit.rootOffset?.y, posDecimals));
+  els.rootOffsetZ.value = String(cleanLiveNumber(edit.rootOffset?.z, posDecimals));
+
+  els.rootRotationX.value = String(cleanLiveNumber(edit.rootRotation?.x, rotDecimals));
+  els.rootRotationY.value = String(cleanLiveNumber(edit.rootRotation?.y, rotDecimals));
+  els.rootRotationZ.value = String(cleanLiveNumber(edit.rootRotation?.z, rotDecimals));
 }
 
 function configureRootGizmoModeUi() {
@@ -1036,18 +1045,16 @@ function configureRootGizmoModeUi() {
   els.rootGizmoSnap.value = selected;
 
   els.rootGizmoHelp.textContent = rotate
-    ? 'Rotar: arrastra los aros X/Y/Z. La rotación usa snap angular para mantener ajustes exactos.'
-    : 'Mover: arrastra X/Y/Z. El desplazamiento se ajusta al paso seleccionado.';
+    ? 'Rotar: respuesta continua en tiempo real. Al soltar se redondea al snap angular elegido.'
+    : 'Mover: respuesta continua en tiempo real. Al soltar se redondea a la precisión elegida.';
 
   rootTransformControls.setMode(rotate ? 'rotate' : 'translate');
   rootTransformControls.setSpace(rotate ? 'local' : 'world');
 
-  rootTransformControls.setTranslationSnap(
-    rotate ? null : Number(state.rootMoveSnap)
-  );
-  rootTransformControls.setRotationSnap(
-    rotate ? THREE.MathUtils.degToRad(Number(state.rootRotateSnap)) : null
-  );
+  // Dragging must remain continuous. Precision/snap is applied only when the
+  // pointer is released, so the character follows the mouse in real time.
+  rootTransformControls.setTranslationSnap(null);
+  rootTransformControls.setRotationSnap(null);
 }
 
 function hideRootGizmo() {
@@ -2579,15 +2586,14 @@ els.rootGizmoSnap.addEventListener('change', () => {
 
   if (state.rootGizmoMode === 'rotate') {
     state.rootRotateSnap = Number.isFinite(value) ? value : 5;
-    rootTransformControls.setRotationSnap(
-      THREE.MathUtils.degToRad(state.rootRotateSnap)
+    setStatus(
+      'Ajuste final de rotación: ' + state.rootRotateSnap + '° · el arrastre sigue siendo continuo.',
+      'info'
     );
-    setStatus('Snap de rotación: ' + state.rootRotateSnap + '°.', 'info');
   } else {
     state.rootMoveSnap = Number.isFinite(value) ? value : 0.5;
-    rootTransformControls.setTranslationSnap(state.rootMoveSnap);
     setStatus(
-      'Precisión de movimiento: ' + state.rootMoveSnap + ' unidades FBX.',
+      'Ajuste final de movimiento: ' + state.rootMoveSnap + ' unidades FBX · el arrastre sigue siendo continuo.',
       'info'
     );
   }
@@ -2601,6 +2607,10 @@ rootTransformControls.addEventListener('mouseDown', () => {
 
   controls.enabled = false;
   state.rootGizmoDragging = true;
+
+  // Keep manipulation fully continuous while the pointer is down.
+  rootTransformControls.setTranslationSnap(null);
+  rootTransformControls.setRotationSnap(null);
 
   const edit = ensureActionEdit(record);
   const startWorld = new THREE.Vector3();
@@ -2666,25 +2676,17 @@ rootTransformControls.addEventListener('objectChange', () => {
       'XYZ'
     );
 
-    const snap = Math.max(Number(state.rootRotateSnap) || 5, 0.0001);
-
-    const nextX = roundOffsetValue(
-      drag.startRotation.x + THREE.MathUtils.radToDeg(deltaEuler.x),
-      snap
-    );
-    const nextY = roundOffsetValue(
-      drag.startRotation.y + THREE.MathUtils.radToDeg(deltaEuler.y),
-      snap
-    );
-    const nextZ = roundOffsetValue(
-      drag.startRotation.z + THREE.MathUtils.radToDeg(deltaEuler.z),
-      snap
-    );
+    const nextX =
+      drag.startRotation.x + THREE.MathUtils.radToDeg(deltaEuler.x);
+    const nextY =
+      drag.startRotation.y + THREE.MathUtils.radToDeg(deltaEuler.y);
+    const nextZ =
+      drag.startRotation.z + THREE.MathUtils.radToDeg(deltaEuler.z);
 
     edit.rootRotation.x = nextX;
     edit.rootRotation.y = nextY;
     edit.rootRotation.z = nextZ;
-    updateRootOffsetFields(edit);
+    updateRootOffsetFields(edit, { live: true });
 
     const appliedDelta = new THREE.Quaternion().setFromEuler(
       new THREE.Euler(
@@ -2718,24 +2720,22 @@ rootTransformControls.addEventListener('objectChange', () => {
     deltaLocal = currentWorld.sub(drag.startWorld);
   }
 
-  const step = Number(state.rootMoveSnap) || 0.5;
-
-  const nextX = roundOffsetValue(drag.startOffset.x + deltaLocal.x, step);
-  const nextY = roundOffsetValue(drag.startOffset.y + deltaLocal.y, step);
-  const nextZ = roundOffsetValue(drag.startOffset.z + deltaLocal.z, step);
+  const nextX = drag.startOffset.x + deltaLocal.x;
+  const nextY = drag.startOffset.y + deltaLocal.y;
+  const nextZ = drag.startOffset.z + deltaLocal.z;
 
   edit.rootOffset.x = nextX;
   edit.rootOffset.y = nextY;
   edit.rootOffset.z = nextZ;
-  updateRootOffsetFields(edit);
+  updateRootOffsetFields(edit, { live: true });
 
-  const snappedDelta = new THREE.Vector3(
+  const liveDelta = new THREE.Vector3(
     nextX - drag.startOffset.x,
     nextY - drag.startOffset.y,
     nextZ - drag.startOffset.z
   );
 
-  drag.target.position.copy(drag.startTargetLocal).add(snappedDelta);
+  drag.target.position.copy(drag.startTargetLocal).add(liveDelta);
   drag.target.updateMatrixWorld(true);
 });
 
@@ -2751,6 +2751,25 @@ rootTransformControls.addEventListener('mouseUp', () => {
   }
 
   const record = state.clips.find((item) => item.id === drag.recordId);
+
+  if (record) {
+    const edit = ensureActionEdit(record);
+
+    if (drag.mode === 'rotate') {
+      const snap = Math.max(Number(state.rootRotateSnap) || 5, 0.0001);
+      edit.rootRotation.x = roundOffsetValue(edit.rootRotation.x, snap);
+      edit.rootRotation.y = roundOffsetValue(edit.rootRotation.y, snap);
+      edit.rootRotation.z = roundOffsetValue(edit.rootRotation.z, snap);
+    } else {
+      const snap = Math.max(Number(state.rootMoveSnap) || 0.5, 0.000001);
+      edit.rootOffset.x = roundOffsetValue(edit.rootOffset.x, snap);
+      edit.rootOffset.y = roundOffsetValue(edit.rootOffset.y, snap);
+      edit.rootOffset.z = roundOffsetValue(edit.rootOffset.z, snap);
+    }
+
+    updateRootOffsetFields(edit);
+  }
+
   if (record && state.mixer) {
     playClip(record.id, {
       preserveTime: drag.time,
