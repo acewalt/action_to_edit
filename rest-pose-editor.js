@@ -17,8 +17,20 @@ export class RestPoseEditor {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x0b0e12);
 
-    this.camera = new THREE.PerspectiveCamera(42, 1, 0.001, 100000);
-    this.camera.position.set(3.2, 2.2, 5.4);
+    this.perspectiveCamera = new THREE.PerspectiveCamera(42, 1, 0.001, 100000);
+    this.perspectiveCamera.position.set(3.2, 2.2, 5.4);
+
+    this.orthographicCamera = new THREE.OrthographicCamera(-2, 2, 2, -2, 0.001, 100000);
+    this.orthographicCamera.position.copy(this.perspectiveCamera.position);
+
+    this.camera = this.perspectiveCamera;
+    this.projectionMode = 'perspective';
+    this.freeProjectionMode = 'perspective';
+    this.orthoViewHeight = 4;
+    this.axisViewActive = false;
+    this.axisViewReturnMode = 'perspective';
+    this.axisViewQuaternion = null;
+    this.axisSnapDrag = null;
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -31,18 +43,34 @@ export class RestPoseEditor {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.screenSpacePanning = true;
+    this.controls.zoomToCursor = false;
     this.controls.target.set(0, 1, 0);
+    this.controls.mouseButtons.LEFT = null;
+    this.controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+    this.controls.mouseButtons.RIGHT = null;
 
     this.transform = new TransformControls(this.camera, this.renderer.domElement);
     this.transform.setMode('rotate');
     this.transform.setSpace('local');
-    this.transform.size = 0.75;
+    this.transform.size = 0.72;
     this.scene.add(this.transform.getHelper());
+
+    if (typeof this.transform.setColors === 'function') {
+      this.transform.setColors(
+        0xff3b4f,
+        0x42d66b,
+        0x3f7cff,
+        0xffd84a
+      );
+    }
 
     this.transform.addEventListener('dragging-changed', (event) => {
       this.controls.enabled = !event.value;
       this.transformDragging = Boolean(event.value);
+
       if (!event.value) {
+        this.sourceRoot?.updateMatrixWorld(true);
+        this.updateSkeletonLines();
         this.updateMarkers();
         this.onPoseChanged?.(this.capturePose());
       }
@@ -50,17 +78,28 @@ export class RestPoseEditor {
 
     this.transform.addEventListener('objectChange', () => {
       this.sourceRoot?.updateMatrixWorld(true);
+      this.updateSkeletonLines();
       this.updateMarkers();
     });
 
     this.sourceGroup = new THREE.Group();
     this.sourceGroup.name = '__RestPoseSourceDisplay__';
+
     this.targetGroup = new THREE.Group();
     this.targetGroup.name = '__RestPoseTargetDisplay__';
+
     this.markerGroup = new THREE.Group();
     this.markerGroup.name = '__RestPoseBoneMarkers__';
 
-    this.scene.add(this.sourceGroup, this.targetGroup, this.markerGroup);
+    this.poseHandleGroup = new THREE.Group();
+    this.poseHandleGroup.name = '__RestPoseLargeControls__';
+
+    this.scene.add(
+      this.sourceGroup,
+      this.targetGroup,
+      this.markerGroup,
+      this.poseHandleGroup
+    );
 
     const hemi = new THREE.HemisphereLight(0xffffff, 0x1c222a, 2.0);
     this.scene.add(hemi);
@@ -85,18 +124,36 @@ export class RestPoseEditor {
     this.targetAsset = null;
     this.sourceBones = new Map();
     this.targetBones = new Map();
+    this.sourceRestWorldQuaternions = new Map();
+
+    this.sourceSkeletonView = null;
+    this.targetSkeletonView = null;
+
     this.markers = [];
+    this.poseHandles = [];
     this.selectedBoneName = '';
+
     this.sourceVisible = true;
     this.targetVisible = true;
     this.meshesVisible = true;
     this.autoScale = true;
     this.displayScaleRatio = 1;
+
     this.transformDragging = false;
     this.disposed = false;
 
+    this.createNavigationUi();
+    this.installNavigationEvents();
+
     this.renderer.domElement.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0 || this.transformDragging) return;
+      if (
+        event.button !== 0 ||
+        this.transformDragging ||
+        this.transform.axis
+      ) {
+        return;
+      }
+
       this.pickBone(event);
     });
 
@@ -106,6 +163,183 @@ export class RestPoseEditor {
 
     this.animate = this.animate.bind(this);
     this.animationFrame = requestAnimationFrame(this.animate);
+  }
+
+  createNavigationUi() {
+    this.navRoot = document.createElement('div');
+    this.navRoot.className = 'rest-pose-navigation';
+
+    this.projectionButton = document.createElement('button');
+    this.projectionButton.type = 'button';
+    this.projectionButton.className = 'rest-pose-projection-button';
+    this.projectionButton.textContent = 'Perspectiva';
+    this.projectionButton.title = 'Alternar Perspectiva / Ortográfica';
+
+    this.gizmo = document.createElement('div');
+    this.gizmo.className = 'rest-pose-view-gizmo';
+
+    this.gizmoSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    this.gizmoSvg.setAttribute('viewBox', '0 0 86 86');
+    this.gizmoSvg.classList.add('rest-pose-view-gizmo-lines');
+
+    this.axisLines = {};
+    for (const key of ['+x', '-x', '+y', '-y', '+z', '-z']) {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', '43');
+      line.setAttribute('y1', '43');
+      line.setAttribute('x2', '43');
+      line.setAttribute('y2', '43');
+      line.dataset.axis = key;
+      this.gizmoSvg.appendChild(line);
+      this.axisLines[key] = line;
+    }
+
+    this.gizmo.appendChild(this.gizmoSvg);
+
+    const center = document.createElement('span');
+    center.className = 'rest-pose-view-center';
+    this.gizmo.appendChild(center);
+
+    this.axisButtons = [];
+
+    const defs = [
+      ['+x', 'X', 'x'],
+      ['-x', '', 'x neg'],
+      ['+y', 'Y', 'y'],
+      ['-y', '', 'y neg'],
+      ['+z', 'Z', 'z'],
+      ['-z', '', 'z neg'],
+    ];
+
+    for (const [axis, label, cls] of defs) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'rest-pose-axis-button ' + cls;
+      button.dataset.axisView = axis;
+      button.textContent = label;
+      button.title = 'Vista ' + axis + ' ortográfica';
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.switchToAxisView(axis);
+      });
+      this.gizmo.appendChild(button);
+      this.axisButtons.push(button);
+    }
+
+    this.projectionButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const next =
+        this.freeProjectionMode === 'perspective'
+          ? 'orthographic'
+          : 'perspective';
+
+      this.freeProjectionMode = next;
+      this.axisViewActive = false;
+      this.axisViewQuaternion = null;
+      this.setActiveCamera(next, { preserveView: true });
+      this.updateProjectionButton();
+    });
+
+    this.navRoot.append(this.projectionButton, this.gizmo);
+    this.container.appendChild(this.navRoot);
+
+    this.updateProjectionButton();
+  }
+
+  installNavigationEvents() {
+    this.onNavigationPointerDown = (event) => {
+      if (
+        event.pointerType === 'touch' ||
+        event.button !== 1 ||
+        this.transformDragging
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (event.altKey) {
+        event.stopImmediatePropagation();
+        this.beginAxisSnap(event);
+        return;
+      }
+
+      const isOrbitGesture =
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey;
+
+      if (this.axisViewActive && isOrbitGesture) {
+        const returnMode = this.freeProjectionMode;
+        this.axisViewActive = false;
+        this.axisViewQuaternion = null;
+
+        if (
+          returnMode === 'perspective' &&
+          this.camera.isOrthographicCamera
+        ) {
+          this.setActiveCamera('perspective', { preserveView: true });
+        } else if (
+          returnMode === 'orthographic' &&
+          this.camera.isPerspectiveCamera
+        ) {
+          this.setActiveCamera('orthographic', { preserveView: true });
+        }
+      }
+
+      this.controls.mouseButtons.MIDDLE =
+        (event.ctrlKey || event.metaKey)
+          ? THREE.MOUSE.DOLLY
+          : THREE.MOUSE.ROTATE;
+    };
+
+    this.onNavigationPointerMove = (event) => {
+      if (!this.axisSnapDrag) return;
+      event.preventDefault();
+      this.updateAxisSnap(event);
+    };
+
+    this.onNavigationPointerUp = (event) => {
+      if (this.axisSnapDrag) {
+        this.endAxisSnap(event);
+      }
+
+      this.controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+    };
+
+    this.onAuxClick = (event) => {
+      if (event.button === 1) event.preventDefault();
+    };
+
+    this.renderer.domElement.addEventListener(
+      'pointerdown',
+      this.onNavigationPointerDown,
+      { capture: true }
+    );
+
+    this.renderer.domElement.addEventListener(
+      'auxclick',
+      this.onAuxClick
+    );
+
+    window.addEventListener(
+      'pointermove',
+      this.onNavigationPointerMove,
+      { passive: false }
+    );
+
+    window.addEventListener(
+      'pointerup',
+      this.onNavigationPointerUp
+    );
+
+    window.addEventListener(
+      'pointercancel',
+      this.onNavigationPointerUp
+    );
   }
 
   setAssets({
@@ -127,24 +361,13 @@ export class RestPoseEditor {
     this.sourceRoot = SkeletonUtils.clone(sourceAsset.object);
     this.targetRoot = SkeletonUtils.clone(targetAsset.object);
 
+    // This editor is intentionally STATIC. It never creates an AnimationMixer
+    // and it always restores the imported rest transforms before editing.
+    this.sourceRoot.animations = [];
+    this.targetRoot.animations = [];
+
     applyRestPose(this.sourceRoot, sourceAsset.restPose);
     applyRestPose(this.targetRoot, targetAsset.restPose);
-
-    if (poseOverride) {
-      applyBonePoseOverride(this.sourceRoot, poseOverride);
-    }
-
-    cloneMaterialsForPreview(this.sourceRoot, {
-      opacity: 0.58,
-      wireframe: false,
-      depthWrite: true,
-    });
-
-    cloneMaterialsForPreview(this.targetRoot, {
-      opacity: 0.26,
-      wireframe: true,
-      depthWrite: false,
-    });
 
     this.sourceGroup.add(this.sourceRoot);
     this.targetGroup.add(this.targetRoot);
@@ -152,22 +375,49 @@ export class RestPoseEditor {
     this.sourceBones = collectBones(this.sourceRoot);
     this.targetBones = collectBones(this.targetRoot);
 
-    this.sourceHelper = new THREE.SkeletonHelper(this.sourceRoot);
-    this.sourceHelper.material.color.setHex(0x9ecbff);
-    this.sourceHelper.material.depthTest = false;
-    this.sourceHelper.renderOrder = 20;
-    this.scene.add(this.sourceHelper);
+    this.sourceGroup.updateMatrixWorld(true);
+    this.sourceRestWorldQuaternions =
+      captureWorldQuaternions(this.sourceBones);
 
-    this.targetHelper = new THREE.SkeletonHelper(this.targetRoot);
-    this.targetHelper.material.color.setHex(0xffce78);
-    this.targetHelper.material.transparent = true;
-    this.targetHelper.material.opacity = 0.72;
-    this.targetHelper.material.depthTest = false;
-    this.targetHelper.renderOrder = 19;
-    this.scene.add(this.targetHelper);
+    if (poseOverride) {
+      applyBonePoseOverride(this.sourceRoot, poseOverride);
+    }
+
+    cloneMaterialsForPreview(this.sourceRoot, {
+      opacity: 0.48,
+      wireframe: false,
+      depthWrite: true,
+      tint: 0x9fbfe0,
+    });
+
+    cloneMaterialsForPreview(this.targetRoot, {
+      opacity: 0.22,
+      wireframe: true,
+      depthWrite: false,
+      tint: 0xe6bd72,
+    });
 
     this.alignForComparison();
+
+    this.sourceSkeletonView = createFilteredSkeletonView(
+      this.sourceBones,
+      0x78b9ff
+    );
+    this.targetSkeletonView = createFilteredSkeletonView(
+      this.targetBones,
+      0xffc45f
+    );
+
+    if (this.sourceSkeletonView?.line) {
+      this.scene.add(this.sourceSkeletonView.line);
+    }
+    if (this.targetSkeletonView?.line) {
+      this.scene.add(this.targetSkeletonView.line);
+    }
+
     this.buildMarkers();
+    this.buildPoseHandles();
+
     this.setVisibility({
       source: this.sourceVisible,
       target: this.targetVisible,
@@ -180,42 +430,57 @@ export class RestPoseEditor {
         : this.guessFirstEditableBone();
 
     if (preferred) this.selectBone(preferred);
+
+    this.updateSkeletonLines();
     this.fit();
   }
 
   clearDisplay() {
     this.transform.detach();
     this.clearMarkers();
+    this.clearPoseHandles();
 
-    if (this.sourceHelper) {
-      this.scene.remove(this.sourceHelper);
-      this.sourceHelper.dispose?.();
-      this.sourceHelper = null;
+    if (this.sourceSkeletonView?.line) {
+      this.scene.remove(this.sourceSkeletonView.line);
+      this.sourceSkeletonView.line.geometry.dispose();
+      this.sourceSkeletonView.line.material.dispose();
     }
-    if (this.targetHelper) {
-      this.scene.remove(this.targetHelper);
-      this.targetHelper.dispose?.();
-      this.targetHelper = null;
+
+    if (this.targetSkeletonView?.line) {
+      this.scene.remove(this.targetSkeletonView.line);
+      this.targetSkeletonView.line.geometry.dispose();
+      this.targetSkeletonView.line.material.dispose();
     }
+
+    this.sourceSkeletonView = null;
+    this.targetSkeletonView = null;
 
     if (this.sourceRoot) {
       disposePreviewClone(this.sourceRoot);
+      this.sourceRoot.removeFromParent();
       this.sourceRoot = null;
     }
+
     if (this.targetRoot) {
       disposePreviewClone(this.targetRoot);
+      this.targetRoot.removeFromParent();
       this.targetRoot = null;
     }
 
     this.sourceGroup.clear();
     this.targetGroup.clear();
+
     this.sourceGroup.position.set(0, 0, 0);
+    this.sourceGroup.quaternion.identity();
     this.sourceGroup.scale.set(1, 1, 1);
+
     this.targetGroup.position.set(0, 0, 0);
+    this.targetGroup.quaternion.identity();
     this.targetGroup.scale.set(1, 1, 1);
 
     this.sourceBones = new Map();
     this.targetBones = new Map();
+    this.sourceRestWorldQuaternions = new Map();
   }
 
   alignForComparison() {
@@ -223,6 +488,7 @@ export class RestPoseEditor {
 
     this.sourceGroup.position.set(0, 0, 0);
     this.sourceGroup.scale.set(1, 1, 1);
+
     this.targetGroup.position.set(0, 0, 0);
     this.targetGroup.scale.set(1, 1, 1);
 
@@ -254,12 +520,15 @@ export class RestPoseEditor {
     this.sourceGroup.position.y += targetBox.min.y - sourceBox.min.y;
 
     this.sourceGroup.updateMatrixWorld(true);
+    this.targetGroup.updateMatrixWorld(true);
   }
 
   setAutoScale(enabled) {
     this.autoScale = Boolean(enabled);
     if (!this.sourceRoot || !this.targetRoot) return;
+
     this.alignForComparison();
+    this.updateSkeletonLines();
     this.updateMarkers();
     this.fit();
   }
@@ -276,20 +545,28 @@ export class RestPoseEditor {
     this.sourceGroup.visible = this.sourceVisible;
     this.targetGroup.visible = this.targetVisible;
     this.markerGroup.visible = this.sourceVisible;
+    this.poseHandleGroup.visible = this.sourceVisible;
 
     setMeshVisibility(this.sourceRoot, this.meshesVisible);
     setMeshVisibility(this.targetRoot, this.meshesVisible);
 
-    if (this.sourceHelper) this.sourceHelper.visible = this.sourceVisible;
-    if (this.targetHelper) this.targetHelper.visible = this.targetVisible;
+    if (this.sourceSkeletonView?.line) {
+      this.sourceSkeletonView.line.visible = this.sourceVisible;
+    }
 
-    if (!this.sourceVisible) this.transform.detach();
-    else if (this.selectedBoneName) this.selectBone(this.selectedBoneName);
+    if (this.targetSkeletonView?.line) {
+      this.targetSkeletonView.line.visible = this.targetVisible;
+    }
+
+    if (!this.sourceVisible) {
+      this.transform.detach();
+    } else if (this.selectedBoneName) {
+      this.selectBone(this.selectedBoneName);
+    }
   }
 
   setMode(mode) {
-    const next = mode === 'translate' ? 'translate' : 'rotate';
-    this.transform.setMode(next);
+    this.transform.setMode(mode === 'translate' ? 'translate' : 'rotate');
   }
 
   setSpace(space) {
@@ -306,9 +583,18 @@ export class RestPoseEditor {
 
     for (const marker of this.markers) {
       const selected = marker.userData.boneName === name;
-      marker.scale.setScalar(selected ? 1.7 : 1);
+      marker.scale.setScalar(selected ? 1.75 : 1);
       marker.material.color.setHex(selected ? 0xffffff : 0x82bfff);
-      marker.material.opacity = selected ? 1 : 0.72;
+      marker.material.opacity = selected ? 1 : 0.65;
+    }
+
+    for (const handle of this.poseHandles) {
+      const selected = handle.userData.boneName === name;
+      handle.material.color.setHex(selected ? 0xffffff : 0x6eaef2);
+      handle.material.opacity = selected ? 0.95 : 0.45;
+      handle.scale.setScalar(
+        (handle.userData.baseScale || 1) * (selected ? 1.18 : 1)
+      );
     }
 
     this.onBoneSelected?.(name);
@@ -316,29 +602,138 @@ export class RestPoseEditor {
   }
 
   resetSelectedBone() {
-    if (!this.selectedBoneName || !this.sourceAsset?.restPose || !this.sourceRoot) {
+    if (
+      !this.selectedBoneName ||
+      !this.sourceAsset?.restPose ||
+      !this.sourceRoot
+    ) {
       return;
     }
 
     const bone = this.sourceBones.get(this.selectedBoneName);
     const rest = this.sourceAsset.restPose.get(this.selectedBoneName);
+
     if (!bone || !rest) return;
 
     bone.position.copy(rest.position);
     bone.quaternion.copy(rest.quaternion);
     bone.scale.copy(rest.scale);
+
     this.sourceRoot.updateMatrixWorld(true);
+    this.updateSkeletonLines();
     this.updateMarkers();
     this.onPoseChanged?.(this.capturePose());
   }
 
   resetAll() {
     if (!this.sourceRoot || !this.sourceAsset?.restPose) return;
+
     applyRestPose(this.sourceRoot, this.sourceAsset.restPose);
-    this.alignForComparison();
+    this.sourceRoot.updateMatrixWorld(true);
+
+    this.updateSkeletonLines();
     this.updateMarkers();
-    if (this.selectedBoneName) this.selectBone(this.selectedBoneName);
+
+    if (this.selectedBoneName) {
+      this.selectBone(this.selectedBoneName);
+    }
+
     this.onPoseChanged?.(this.capturePose());
+  }
+
+  copySelectedToOpposite() {
+    const sourceName = this.selectedBoneName;
+    if (!sourceName) {
+      return {
+        ok: false,
+        message: 'Selecciona primero un hueso del Source.',
+      };
+    }
+
+    const targetName = findOppositeBoneName(
+      sourceName,
+      [...this.sourceBones.keys()]
+    );
+
+    if (!targetName) {
+      return {
+        ok: false,
+        message:
+          'No se encontró un hueso opuesto para "' + sourceName + '".',
+      };
+    }
+
+    const sourceBone = this.sourceBones.get(sourceName);
+    const targetBone = this.sourceBones.get(targetName);
+
+    const sourceRestWorld = this.sourceRestWorldQuaternions.get(sourceName);
+    const targetRestWorld = this.sourceRestWorldQuaternions.get(targetName);
+
+    if (
+      !sourceBone ||
+      !targetBone ||
+      !sourceRestWorld ||
+      !targetRestWorld
+    ) {
+      return {
+        ok: false,
+        message: 'No se pudo resolver el Rest de ambos huesos.',
+      };
+    }
+
+    this.sourceRoot.updateMatrixWorld(true);
+
+    const sourceCurrentWorld = new THREE.Quaternion();
+    sourceBone.getWorldQuaternion(sourceCurrentWorld);
+
+    const deltaWorld = sourceCurrentWorld
+      .clone()
+      .multiply(sourceRestWorld.clone().invert())
+      .normalize();
+
+    const deltaMatrix = new THREE.Matrix4().makeRotationFromQuaternion(
+      deltaWorld
+    );
+
+    const mirrorX = new THREE.Matrix4().makeScale(-1, 1, 1);
+
+    const mirroredMatrix = mirrorX
+      .clone()
+      .multiply(deltaMatrix)
+      .multiply(mirrorX);
+
+    const mirroredDelta = new THREE.Quaternion()
+      .setFromRotationMatrix(mirroredMatrix)
+      .normalize();
+
+    const desiredTargetWorld = mirroredDelta
+      .clone()
+      .multiply(targetRestWorld)
+      .normalize();
+
+    const parentWorld = new THREE.Quaternion();
+    if (targetBone.parent) {
+      targetBone.parent.getWorldQuaternion(parentWorld);
+    }
+
+    targetBone.quaternion.copy(
+      parentWorld
+        .invert()
+        .multiply(desiredTargetWorld)
+        .normalize()
+    );
+
+    this.sourceRoot.updateMatrixWorld(true);
+    this.updateSkeletonLines();
+    this.updateMarkers();
+
+    this.onPoseChanged?.(this.capturePose());
+
+    return {
+      ok: true,
+      source: sourceName,
+      target: targetName,
+    };
   }
 
   capturePose() {
@@ -347,6 +742,7 @@ export class RestPoseEditor {
 
     this.sourceRoot.traverse((node) => {
       if (!node.isBone || !node.name) return;
+
       pose[node.name] = {
         position: node.position.toArray(),
         quaternion: node.quaternion.toArray(),
@@ -359,26 +755,42 @@ export class RestPoseEditor {
 
   applyPose(pose) {
     if (!this.sourceRoot || !pose) return;
+
     applyRestPose(this.sourceRoot, this.sourceAsset?.restPose);
     applyBonePoseOverride(this.sourceRoot, pose);
-    this.alignForComparison();
+
+    this.sourceRoot.updateMatrixWorld(true);
+    this.updateSkeletonLines();
     this.updateMarkers();
-    if (this.selectedBoneName) this.selectBone(this.selectedBoneName);
+
+    if (this.selectedBoneName) {
+      this.selectBone(this.selectedBoneName);
+    }
   }
 
   buildMarkers() {
     this.clearMarkers();
     if (!this.sourceBones.size) return;
 
-    const sourceHeight = Math.max(computeBoneHeight(this.sourceBones) * this.displayScaleRatio, 0.1);
-    const radius = THREE.MathUtils.clamp(sourceHeight * 0.0075, 0.008, 0.06);
-    const geometry = new THREE.SphereGeometry(radius, 10, 8);
+    const sourceHeight = Math.max(
+      computeBoneHeight(this.sourceBones) * this.displayScaleRatio,
+      0.1
+    );
+
+    const radius = THREE.MathUtils.clamp(
+      sourceHeight * 0.005,
+      0.006,
+      0.045
+    );
+
+    const geometry = new THREE.SphereGeometry(radius, 9, 7);
+    this.markerGeometry = geometry;
 
     for (const [name, bone] of this.sourceBones) {
       const material = new THREE.MeshBasicMaterial({
         color: 0x82bfff,
         transparent: true,
-        opacity: 0.72,
+        opacity: 0.65,
         depthTest: false,
       });
 
@@ -386,11 +798,59 @@ export class RestPoseEditor {
       marker.renderOrder = 30;
       marker.userData.boneName = name;
       marker.userData.bone = bone;
+
       this.markerGroup.add(marker);
       this.markers.push(marker);
     }
 
-    this.markerGeometry = geometry;
+    this.updateMarkers();
+  }
+
+  buildPoseHandles() {
+    this.clearPoseHandles();
+    if (!this.sourceBones.size) return;
+
+    const sourceHeight = Math.max(
+      computeBoneHeight(this.sourceBones) * this.displayScaleRatio,
+      0.1
+    );
+
+    const geometry = new THREE.TorusGeometry(1, 0.055, 8, 40);
+    this.poseHandleGeometry = geometry;
+
+    const candidates = choosePoseHandleBones(this.sourceBones);
+
+    for (const bone of candidates) {
+      const material = new THREE.MeshBasicMaterial({
+        color: 0x6eaef2,
+        transparent: true,
+        opacity: 0.45,
+        depthTest: false,
+        side: THREE.DoubleSide,
+      });
+
+      const handle = new THREE.Mesh(geometry, material);
+      const semantic = semanticNameForHandle(bone.name);
+
+      let scale = sourceHeight * 0.035;
+      if (/hips|spine|chest|head|neck/.test(semantic)) {
+        scale *= 1.35;
+      } else if (/hand|foot/.test(semantic)) {
+        scale *= 0.72;
+      }
+
+      scale = THREE.MathUtils.clamp(scale, 0.035, 0.24);
+
+      handle.scale.setScalar(scale);
+      handle.userData.baseScale = scale;
+      handle.userData.boneName = bone.name;
+      handle.userData.bone = bone;
+      handle.renderOrder = 32;
+
+      this.poseHandleGroup.add(handle);
+      this.poseHandles.push(handle);
+    }
+
     this.updateMarkers();
   }
 
@@ -398,33 +858,72 @@ export class RestPoseEditor {
     for (const marker of this.markers) {
       marker.material?.dispose?.();
     }
+
     this.markers = [];
     this.markerGroup.clear();
     this.markerGeometry?.dispose?.();
     this.markerGeometry = null;
   }
 
+  clearPoseHandles() {
+    for (const handle of this.poseHandles) {
+      handle.material?.dispose?.();
+    }
+
+    this.poseHandles = [];
+    this.poseHandleGroup.clear();
+    this.poseHandleGeometry?.dispose?.();
+    this.poseHandleGeometry = null;
+  }
+
   updateMarkers() {
     const world = new THREE.Vector3();
+
     for (const marker of this.markers) {
       const bone = marker.userData.bone;
       if (!bone) continue;
+
       bone.getWorldPosition(world);
       marker.position.copy(world);
     }
+
+    for (const handle of this.poseHandles) {
+      const bone = handle.userData.bone;
+      if (!bone) continue;
+
+      bone.getWorldPosition(world);
+      handle.position.copy(world);
+
+      // Screen-facing rings behave like Blender custom-shape "empties":
+      // large, easy to see and easy to click from any viewing angle.
+      handle.quaternion.copy(this.camera.quaternion);
+    }
+  }
+
+  updateSkeletonLines() {
+    updateFilteredSkeletonView(this.sourceSkeletonView);
+    updateFilteredSkeletonView(this.targetSkeletonView);
   }
 
   pickBone(event) {
-    if (!this.sourceVisible || !this.markers.length) return;
+    if (!this.sourceVisible) return;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
 
-    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.pointer.x =
+      ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y =
+      -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hits = this.raycaster.intersectObjects(this.markers, false);
+
+    const pickables = [
+      ...this.poseHandles,
+      ...this.markers,
+    ];
+
+    const hits = this.raycaster.intersectObjects(pickables, false);
     if (!hits.length) return;
 
     const name = hits[0].object.userData.boneName;
@@ -434,6 +933,13 @@ export class RestPoseEditor {
   fit() {
     if (!this.sourceRoot && !this.targetRoot) return;
 
+    // Same behavior as the main viewport's Encuadrar:
+    // reset to a stable perspective navigation state first.
+    this.freeProjectionMode = 'perspective';
+    this.axisViewActive = false;
+    this.axisViewQuaternion = null;
+    this.setActiveCamera('perspective', { preserveView: false });
+
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
 
@@ -442,8 +948,10 @@ export class RestPoseEditor {
 
     for (const group of [this.sourceGroup, this.targetGroup]) {
       if (!group.visible) continue;
+
       const current = safeBoxFromObject(group);
       if (!current) continue;
+
       if (!hasBox) {
         box.copy(current);
         hasBox = true;
@@ -458,24 +966,351 @@ export class RestPoseEditor {
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 0.1);
 
-    const fov = THREE.MathUtils.degToRad(this.camera.fov);
-    const distance = (maxDim * 0.68) / Math.tan(fov * 0.5);
+    const fov = THREE.MathUtils.degToRad(this.perspectiveCamera.fov);
+    const distance =
+      (maxDim * 0.72) /
+      Math.tan(fov * 0.5);
 
-    const direction = new THREE.Vector3(0.48, 0.2, 1).normalize();
-    this.camera.position.copy(center).addScaledVector(direction, distance * 1.4);
-    this.camera.near = Math.max(distance / 1000, 0.001);
-    this.camera.far = Math.max(distance * 50, 100);
-    this.camera.updateProjectionMatrix();
+    const direction = new THREE.Vector3(0.32, 0.12, 1).normalize();
 
+    this.perspectiveCamera.position
+      .copy(center)
+      .addScaledVector(direction, distance * 1.35);
+
+    this.perspectiveCamera.up.set(0, 1, 0);
+    this.perspectiveCamera.lookAt(center);
+    this.perspectiveCamera.near = Math.max(distance / 5000, 0.001);
+    this.perspectiveCamera.far = Math.max(distance * 100, 1000);
+    this.perspectiveCamera.updateProjectionMatrix();
+    this.perspectiveCamera.updateMatrixWorld(true);
+
+    this.camera = this.perspectiveCamera;
+    this.controls.object = this.camera;
     this.controls.target.copy(center);
-    this.controls.update();
+    this.transform.camera = this.camera;
+    this.flushControls();
 
     this.grid.position.y = box.min.y;
     this.grid.scale.setScalar(Math.max(maxDim / 10, 0.1));
+
+    this.updateProjectionButton();
+    this.updateNavigationGizmo();
+  }
+
+  setActiveCamera(mode, { preserveView = true } = {}) {
+    const nextMode =
+      mode === 'orthographic'
+        ? 'orthographic'
+        : 'perspective';
+
+    if (this.projectionMode === nextMode && this.camera) {
+      this.updateProjectionButton();
+      return;
+    }
+
+    const previous = this.camera;
+    const target = this.controls.target.clone();
+
+    let direction = previous.position.clone().sub(target);
+    if (direction.lengthSq() < 1e-10) {
+      direction.set(0.32, 0.12, 1);
+    }
+    direction.normalize();
+
+    if (nextMode === 'orthographic') {
+      if (preserveView && previous.isPerspectiveCamera) {
+        this.orthoViewHeight = this.perspectiveVisibleHeightAtTarget();
+      }
+
+      const distance = Math.max(
+        previous.position.distanceTo(target),
+        0.1
+      );
+
+      this.syncOrthographicFrustum(this.orthoViewHeight);
+      this.orthographicCamera.zoom = 1;
+      this.orthographicCamera.position
+        .copy(target)
+        .addScaledVector(direction, distance);
+      this.orthographicCamera.up.copy(previous.up);
+      this.orthographicCamera.lookAt(target);
+      this.orthographicCamera.updateMatrixWorld(true);
+
+      this.camera = this.orthographicCamera;
+    } else {
+      let visibleHeight = this.perspectiveVisibleHeightAtTarget();
+
+      if (previous.isOrthographicCamera) {
+        visibleHeight =
+          this.orthoViewHeight /
+          Math.max(previous.zoom || 1, 0.000001);
+      }
+
+      const halfFov =
+        THREE.MathUtils.degToRad(this.perspectiveCamera.fov) * 0.5;
+
+      const distance = Math.max(
+        visibleHeight / (2 * Math.tan(halfFov)),
+        0.1
+      );
+
+      direction = safePerspectiveDirection(direction);
+
+      this.perspectiveCamera.up.set(0, 1, 0);
+      this.perspectiveCamera.zoom = 1;
+      this.perspectiveCamera.position
+        .copy(target)
+        .addScaledVector(direction, distance);
+      this.perspectiveCamera.lookAt(target);
+      this.perspectiveCamera.aspect = this.getAspect();
+      this.perspectiveCamera.near = Math.max(distance / 5000, 0.001);
+      this.perspectiveCamera.far = Math.max(distance * 100, 1000);
+      this.perspectiveCamera.updateProjectionMatrix();
+      this.perspectiveCamera.updateMatrixWorld(true);
+
+      this.camera = this.perspectiveCamera;
+      this.controls.minDistance = Math.max(distance * 0.02, 0.01);
+      this.controls.maxDistance = Math.max(distance * 50, 100);
+    }
+
+    this.projectionMode = nextMode;
+    this.controls.object = this.camera;
+    this.controls.target.copy(target);
+    this.transform.camera = this.camera;
+
+    this.flushControls();
+    this.updateProjectionButton();
+  }
+
+  switchToAxisView(axisView) {
+    const def = axisViewDefinition(axisView);
+    const target = this.controls.target.clone();
+
+    this.axisViewReturnMode = this.freeProjectionMode;
+
+    let distance = this.camera.position.distanceTo(target);
+    if (!Number.isFinite(distance) || distance < 0.01) {
+      distance = 5;
+    }
+
+    if (this.camera.isPerspectiveCamera) {
+      this.orthoViewHeight = this.perspectiveVisibleHeightAtTarget();
+    }
+
+    this.setActiveCamera('orthographic', { preserveView: true });
+
+    this.camera.position
+      .copy(target)
+      .addScaledVector(def.direction, distance);
+
+    this.camera.up.copy(def.up);
+    this.camera.lookAt(target);
+    this.camera.updateMatrixWorld(true);
+
+    this.controls.object = this.camera;
+    this.controls.target.copy(target);
+    this.flushControls();
+
+    this.axisViewQuaternion = this.camera.quaternion.clone();
+    this.axisViewActive = true;
+
+    this.updateNavigationGizmo();
+  }
+
+  beginAxisSnap(event) {
+    const target = this.controls.target.clone();
+
+    const startDirection =
+      this.camera.position.clone().sub(target);
+
+    if (startDirection.lengthSq() < 1e-10) {
+      startDirection.set(0.32, 0.12, 1);
+    }
+
+    startDirection.normalize();
+
+    const startRight = new THREE.Vector3(1, 0, 0)
+      .applyQuaternion(this.camera.quaternion)
+      .normalize();
+
+    this.axisSnapDrag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startDirection,
+      startRight,
+      lastAxis: null,
+      moved: false,
+    };
+
+    this.controls.enabled = false;
+
+    try {
+      this.renderer.domElement.setPointerCapture(event.pointerId);
+    } catch {}
+  }
+
+  updateAxisSnap(event) {
+    const drag = this.axisSnapDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+
+    if (Math.hypot(dx, dy) < 10) return;
+
+    drag.moved = true;
+
+    const direction = virtualOrbitDirectionFromDrag(
+      drag,
+      dx,
+      dy
+    );
+
+    const axis = nearestAxisViewFromDirection(direction);
+    if (axis === drag.lastAxis) return;
+
+    drag.lastAxis = axis;
+    this.switchToAxisView(axis);
+  }
+
+  endAxisSnap(event) {
+    const drag = this.axisSnapDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+
+    this.axisSnapDrag = null;
+    this.controls.enabled = true;
+    this.controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+
+    try {
+      this.renderer.domElement.releasePointerCapture(event.pointerId);
+    } catch {}
+
+    this.flushControls();
+  }
+
+  flushControls() {
+    const damping = this.controls.enableDamping;
+
+    this.controls.enableDamping = false;
+    this.controls.update();
+
+    this.controls.enableDamping = damping;
+    this.controls.update();
+  }
+
+  getAspect() {
+    return Math.max(
+      this.container.clientWidth /
+        Math.max(this.container.clientHeight, 1),
+      0.05
+    );
+  }
+
+  perspectiveVisibleHeightAtTarget() {
+    const distance = Math.max(
+      this.perspectiveCamera.position.distanceTo(
+        this.controls.target
+      ),
+      0.001
+    );
+
+    return (
+      2 *
+      distance *
+      Math.tan(
+        THREE.MathUtils.degToRad(
+          this.perspectiveCamera.fov
+        ) * 0.5
+      )
+    );
+  }
+
+  syncOrthographicFrustum(viewHeight = this.orthoViewHeight) {
+    const aspect = this.getAspect();
+
+    this.orthoViewHeight = Math.max(
+      Number(viewHeight) || 4,
+      0.001
+    );
+
+    const halfH = this.orthoViewHeight * 0.5;
+    const halfW = halfH * aspect;
+
+    this.orthographicCamera.left = -halfW;
+    this.orthographicCamera.right = halfW;
+    this.orthographicCamera.top = halfH;
+    this.orthographicCamera.bottom = -halfH;
+    this.orthographicCamera.updateProjectionMatrix();
+  }
+
+  updateProjectionButton() {
+    if (!this.projectionButton) return;
+
+    this.projectionButton.textContent =
+      this.freeProjectionMode === 'orthographic'
+        ? 'Ortográfica'
+        : 'Perspectiva';
+  }
+
+  updateNavigationGizmo() {
+    if (!this.gizmo || !this.camera) return;
+
+    const center = 43;
+    const radius = 27;
+
+    const inverseCameraQuat =
+      this.camera.quaternion.clone().invert();
+
+    const axes = [
+      ['+x', new THREE.Vector3(1, 0, 0)],
+      ['-x', new THREE.Vector3(-1, 0, 0)],
+      ['+y', new THREE.Vector3(0, 1, 0)],
+      ['-y', new THREE.Vector3(0, -1, 0)],
+      ['+z', new THREE.Vector3(0, 0, 1)],
+      ['-z', new THREE.Vector3(0, 0, -1)],
+    ];
+
+    for (const [axis, vector] of axes) {
+      const v = vector
+        .clone()
+        .applyQuaternion(inverseCameraQuat);
+
+      const x = center + v.x * radius;
+      const y = center - v.y * radius;
+
+      const button = this.axisButtons.find(
+        (item) => item.dataset.axisView === axis
+      );
+
+      if (button) {
+        button.style.left = x + 'px';
+        button.style.top = y + 'px';
+        button.style.zIndex = String(
+          30 + Math.round((1 - v.z) * 10)
+        );
+        button.style.opacity = String(
+          THREE.MathUtils.clamp(
+            0.45 + (1 - v.z) * 0.4,
+            0.35,
+            1
+          )
+        );
+      }
+
+      const line = this.axisLines[axis];
+      if (line) {
+        line.setAttribute('x1', String(center));
+        line.setAttribute('y1', String(center));
+        line.setAttribute('x2', String(x));
+        line.setAttribute('y2', String(y));
+      }
+    }
   }
 
   guessFirstEditableBone() {
     const names = this.getSourceBoneNames();
+
     return (
       names.find((name) => /(^|[:_.-])hips?$/i.test(name)) ||
       names.find((name) => /spine/i.test(name)) ||
@@ -488,30 +1323,70 @@ export class RestPoseEditor {
   resize() {
     const width = Math.max(this.container.clientWidth, 1);
     const height = Math.max(this.container.clientHeight, 1);
+
     this.renderer.setSize(width, height, false);
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
+
+    this.perspectiveCamera.aspect = width / height;
+    this.perspectiveCamera.updateProjectionMatrix();
+
+    this.syncOrthographicFrustum(this.orthoViewHeight);
   }
 
   animate() {
     if (this.disposed) return;
+
     this.animationFrame = requestAnimationFrame(this.animate);
 
     if (!this.container.offsetParent) return;
 
     this.controls.update();
+    this.updateSkeletonLines();
     this.updateMarkers();
+    this.updateNavigationGizmo();
+
     this.renderer.render(this.scene, this.camera);
   }
 
   dispose() {
     this.disposed = true;
+
     cancelAnimationFrame(this.animationFrame);
     this.resizeObserver?.disconnect();
+
+    this.renderer.domElement.removeEventListener(
+      'pointerdown',
+      this.onNavigationPointerDown,
+      { capture: true }
+    );
+
+    this.renderer.domElement.removeEventListener(
+      'auxclick',
+      this.onAuxClick
+    );
+
+    window.removeEventListener(
+      'pointermove',
+      this.onNavigationPointerMove
+    );
+
+    window.removeEventListener(
+      'pointerup',
+      this.onNavigationPointerUp
+    );
+
+    window.removeEventListener(
+      'pointercancel',
+      this.onNavigationPointerUp
+    );
+
     this.transform.detach();
     this.transform.dispose?.();
     this.controls.dispose?.();
+
     this.clearDisplay();
+
+    this.navRoot?.remove();
+
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
@@ -519,12 +1394,30 @@ export class RestPoseEditor {
 
 function collectBones(root) {
   const map = new Map();
+
   root?.traverse((node) => {
-    if (node.isBone && node.name && !map.has(node.name)) {
+    if (
+      node.isBone &&
+      node.name &&
+      !map.has(node.name)
+    ) {
       map.set(node.name, node);
     }
   });
+
   return map;
+}
+
+function captureWorldQuaternions(bones) {
+  const result = new Map();
+
+  for (const [name, bone] of bones) {
+    const q = new THREE.Quaternion();
+    bone.getWorldQuaternion(q);
+    result.set(name, q);
+  }
+
+  return result;
 }
 
 function applyRestPose(object, restPose) {
@@ -532,6 +1425,7 @@ function applyRestPose(object, restPose) {
 
   object.traverse((node) => {
     if (!node.name) return;
+
     const rest = restPose.get(node.name);
     if (!rest) return;
 
@@ -552,32 +1446,55 @@ function applyBonePoseOverride(root, override) {
 
   root.traverse((node) => {
     if (!node.isBone || !node.name) return;
+
     const value = entries.get(node.name);
     if (!value) return;
 
     if (value.position) {
-      if (Array.isArray(value.position)) node.position.fromArray(value.position);
-      else node.position.set(value.position.x || 0, value.position.y || 0, value.position.z || 0);
+      if (Array.isArray(value.position)) {
+        node.position.fromArray(value.position);
+      } else {
+        node.position.set(
+          Number(value.position.x) || 0,
+          Number(value.position.y) || 0,
+          Number(value.position.z) || 0
+        );
+      }
     }
 
     if (value.quaternion) {
-      if (Array.isArray(value.quaternion)) node.quaternion.fromArray(value.quaternion);
-      else node.quaternion.set(
-        value.quaternion.x || 0,
-        value.quaternion.y || 0,
-        value.quaternion.z || 0,
-        Number.isFinite(Number(value.quaternion.w)) ? Number(value.quaternion.w) : 1
-      );
+      if (Array.isArray(value.quaternion)) {
+        node.quaternion.fromArray(value.quaternion);
+      } else {
+        node.quaternion.set(
+          Number(value.quaternion.x) || 0,
+          Number(value.quaternion.y) || 0,
+          Number(value.quaternion.z) || 0,
+          Number.isFinite(Number(value.quaternion.w))
+            ? Number(value.quaternion.w)
+            : 1
+        );
+      }
+
       node.quaternion.normalize();
     }
 
     if (value.scale) {
-      if (Array.isArray(value.scale)) node.scale.fromArray(value.scale);
-      else node.scale.set(
-        Number.isFinite(Number(value.scale.x)) ? Number(value.scale.x) : 1,
-        Number.isFinite(Number(value.scale.y)) ? Number(value.scale.y) : 1,
-        Number.isFinite(Number(value.scale.z)) ? Number(value.scale.z) : 1
-      );
+      if (Array.isArray(value.scale)) {
+        node.scale.fromArray(value.scale);
+      } else {
+        node.scale.set(
+          Number.isFinite(Number(value.scale.x))
+            ? Number(value.scale.x)
+            : 1,
+          Number.isFinite(Number(value.scale.y))
+            ? Number(value.scale.y)
+            : 1,
+          Number.isFinite(Number(value.scale.z))
+            ? Number(value.scale.z)
+            : 1
+        );
+      }
     }
   });
 
@@ -589,10 +1506,12 @@ function computeBoneHeight(bones) {
 
   let minY = Infinity;
   let maxY = -Infinity;
+
   const point = new THREE.Vector3();
 
   for (const bone of bones.values()) {
     bone.getWorldPosition(point);
+
     minY = Math.min(minY, point.y);
     maxY = Math.max(maxY, point.y);
   }
@@ -605,6 +1524,7 @@ function cloneMaterialsForPreview(root, {
   opacity = 1,
   wireframe = false,
   depthWrite = true,
+  tint = 0xffffff,
 } = {}) {
   root?.traverse((node) => {
     if (!node.isMesh) return;
@@ -615,48 +1535,445 @@ function cloneMaterialsForPreview(root, {
 
     const clones = materials.map((material) => {
       if (!material?.clone) return material;
+
       const copy = material.clone();
-      copy.transparent = opacity < 0.999 || copy.transparent;
+
+      copy.transparent =
+        opacity < 0.999 ||
+        copy.transparent;
+
       copy.opacity = opacity;
       copy.depthWrite = depthWrite;
-      if ('wireframe' in copy) copy.wireframe = wireframe;
+
+      if ('wireframe' in copy) {
+        copy.wireframe = wireframe;
+      }
+
+      if (copy.color) {
+        copy.color.lerp(
+          new THREE.Color(tint),
+          0.38
+        );
+      }
+
       return copy;
     });
 
-    node.material = Array.isArray(node.material) ? clones : clones[0];
+    node.material =
+      Array.isArray(node.material)
+        ? clones
+        : clones[0];
+
     node.frustumCulled = false;
   });
 }
 
 function setMeshVisibility(root, visible) {
   root?.traverse((node) => {
-    if (node.isMesh) node.visible = Boolean(visible);
+    if (node.isMesh) {
+      node.visible = Boolean(visible);
+    }
   });
 }
 
 function safeBoxFromObject(object) {
   if (!object) return null;
+
   object.updateMatrixWorld(true);
 
-  const box = new THREE.Box3().setFromObject(object, true);
+  const box = new THREE.Box3().setFromObject(
+    object,
+    true
+  );
+
   if (box.isEmpty()) return null;
 
   const values = [
-    box.min.x, box.min.y, box.min.z,
-    box.max.x, box.max.y, box.max.z,
+    box.min.x,
+    box.min.y,
+    box.min.z,
+    box.max.x,
+    box.max.y,
+    box.max.z,
   ];
-  if (values.some((value) => !Number.isFinite(value))) return null;
+
+  if (
+    values.some(
+      (value) => !Number.isFinite(value)
+    )
+  ) {
+    return null;
+  }
+
   return box;
+}
+
+function chooseDisplayBoneSet(bones) {
+  const names = [...bones.keys()];
+
+  const def = names.filter((name) =>
+    /^def[-_:]/i.test(name)
+  );
+
+  if (def.length >= 8) {
+    return new Set(def);
+  }
+
+  const mixamo = names.filter((name) =>
+    /^mixamorig/i.test(name) &&
+    !/(end|nub)$/i.test(name)
+  );
+
+  if (mixamo.length >= 8) {
+    return new Set(mixamo);
+  }
+
+  const fk = names.filter((name) =>
+    /^fk[-_:]/i.test(name) &&
+    !/(hng|hanger)/i.test(name)
+  );
+
+  if (fk.length >= 8) {
+    return new Set(fk);
+  }
+
+  return new Set(
+    names.filter((name) =>
+      !/(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|p-str|str-|root-|ik-|hng)/i.test(name)
+    )
+  );
+}
+
+function createFilteredSkeletonView(bones, color) {
+  if (!bones?.size) return null;
+
+  const selected = chooseDisplayBoneSet(bones);
+  const segments = [];
+
+  for (const [name, bone] of bones) {
+    if (!selected.has(name)) continue;
+
+    let parent = bone.parent;
+
+    while (
+      parent &&
+      parent.isBone &&
+      !selected.has(parent.name)
+    ) {
+      parent = parent.parent;
+    }
+
+    if (
+      parent?.isBone &&
+      selected.has(parent.name)
+    ) {
+      segments.push([bone, parent]);
+    }
+  }
+
+  if (!segments.length) return null;
+
+  const positions = new Float32Array(
+    segments.length * 2 * 3
+  );
+
+  const geometry = new THREE.BufferGeometry();
+
+  geometry.setAttribute(
+    'position',
+    new THREE.BufferAttribute(
+      positions,
+      3
+    )
+  );
+
+  const material = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.9,
+    depthTest: false,
+  });
+
+  const line = new THREE.LineSegments(
+    geometry,
+    material
+  );
+
+  line.frustumCulled = false;
+  line.renderOrder = 25;
+
+  return {
+    line,
+    segments,
+  };
+}
+
+function updateFilteredSkeletonView(view) {
+  if (!view?.line || !view.segments?.length) {
+    return;
+  }
+
+  const attribute =
+    view.line.geometry.getAttribute('position');
+
+  const point = new THREE.Vector3();
+  let offset = 0;
+
+  for (const [child, parent] of view.segments) {
+    child.getWorldPosition(point);
+    attribute.array[offset++] = point.x;
+    attribute.array[offset++] = point.y;
+    attribute.array[offset++] = point.z;
+
+    parent.getWorldPosition(point);
+    attribute.array[offset++] = point.x;
+    attribute.array[offset++] = point.y;
+    attribute.array[offset++] = point.z;
+  }
+
+  attribute.needsUpdate = true;
+  view.line.geometry.computeBoundingSphere();
+}
+
+function semanticNameForHandle(name) {
+  let value = String(name || '')
+    .toLowerCase()
+    .replace(/^mixamorig\d*[:_]?/, '')
+    .replace(/^(def|fk|org|mch|ctrl)[-_:]/, '')
+    .replace(/[^a-z0-9]/g, '');
+
+  if (/shoulder|clavicle/.test(value)) return 'shoulder';
+  if (/upperarm/.test(value)) return 'upperarm';
+  if (/forearm|lowerarm/.test(value)) return 'forearm';
+  if (/hand|wrist/.test(value)) return 'hand';
+  if (/thigh|upperleg/.test(value)) return 'thigh';
+  if (/knee|shin|calf|lowerleg/.test(value)) return 'knee';
+  if (/foot|ankle/.test(value)) return 'foot';
+  if (/hips|pelvis/.test(value)) return 'hips';
+  if (/chest/.test(value)) return 'chest';
+  if (/spine/.test(value)) return 'spine';
+  if (/neck/.test(value)) return 'neck';
+  if (/head/.test(value)) return 'head';
+
+  return value;
+}
+
+function choosePoseHandleBones(bones) {
+  const result = [];
+  const used = new Set();
+
+  const preferredNames = [
+    'hips',
+    'spine',
+    'chest',
+    'neck',
+    'head',
+    'shoulder',
+    'upperarm',
+    'forearm',
+    'hand',
+    'thigh',
+    'knee',
+    'foot',
+  ];
+
+  for (const semantic of preferredNames) {
+    for (const [name, bone] of bones) {
+      if (used.has(name)) continue;
+
+      const lower = String(name).toLowerCase();
+
+      if (
+        /(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|ik-|hng|p-str|str-)/i.test(lower)
+      ) {
+        continue;
+      }
+
+      if (semanticNameForHandle(name) !== semantic) {
+        continue;
+      }
+
+      result.push(bone);
+      used.add(name);
+    }
+  }
+
+  return result;
+}
+
+function findOppositeBoneName(name, names) {
+  const list = names || [];
+  const candidates = [];
+
+  const push = (value) => {
+    if (
+      value &&
+      value !== name &&
+      !candidates.includes(value)
+    ) {
+      candidates.push(value);
+    }
+  };
+
+  push(name.replace(/Left/g, 'Right'));
+  push(name.replace(/left/g, 'right'));
+  push(name.replace(/Right/g, 'Left'));
+  push(name.replace(/right/g, 'left'));
+
+  push(name.replace(/\.L$/i, '.R'));
+  push(name.replace(/\.R$/i, '.L'));
+  push(name.replace(/_L$/i, '_R'));
+  push(name.replace(/_R$/i, '_L'));
+  push(name.replace(/-L$/i, '-R'));
+  push(name.replace(/-R$/i, '-L'));
+
+  // Three.js may sanitize ".L/.R" into a trailing L/R.
+  if (/L$/.test(name)) {
+    push(name.slice(0, -1) + 'R');
+  }
+  if (/R$/.test(name)) {
+    push(name.slice(0, -1) + 'L');
+  }
+
+  const lowerMap = new Map(
+    list.map((item) => [
+      String(item).toLowerCase(),
+      item,
+    ])
+  );
+
+  for (const candidate of candidates) {
+    const found = lowerMap.get(
+      candidate.toLowerCase()
+    );
+
+    if (found) return found;
+  }
+
+  return '';
+}
+
+function axisViewDefinition(axisView) {
+  const definitions = {
+    '+x': {
+      direction: new THREE.Vector3(1, 0, 0),
+      up: new THREE.Vector3(0, 1, 0),
+    },
+    '-x': {
+      direction: new THREE.Vector3(-1, 0, 0),
+      up: new THREE.Vector3(0, 1, 0),
+    },
+    '+y': {
+      direction: new THREE.Vector3(0, 1, 0),
+      up: new THREE.Vector3(0, 0, -1),
+    },
+    '-y': {
+      direction: new THREE.Vector3(0, -1, 0),
+      up: new THREE.Vector3(0, 0, 1),
+    },
+    '+z': {
+      direction: new THREE.Vector3(0, 0, 1),
+      up: new THREE.Vector3(0, 1, 0),
+    },
+    '-z': {
+      direction: new THREE.Vector3(0, 0, -1),
+      up: new THREE.Vector3(0, 1, 0),
+    },
+  };
+
+  return (
+    definitions[axisView] ||
+    definitions['+z']
+  );
+}
+
+function nearestAxisViewFromDirection(direction) {
+  const dir = direction.clone().normalize();
+
+  const candidates = [
+    ['+x', new THREE.Vector3(1, 0, 0)],
+    ['-x', new THREE.Vector3(-1, 0, 0)],
+    ['+y', new THREE.Vector3(0, 1, 0)],
+    ['-y', new THREE.Vector3(0, -1, 0)],
+    ['+z', new THREE.Vector3(0, 0, 1)],
+    ['-z', new THREE.Vector3(0, 0, -1)],
+  ];
+
+  let best = '+z';
+  let bestDot = -Infinity;
+
+  for (const [key, axis] of candidates) {
+    const dot = dir.dot(axis);
+
+    if (dot > bestDot) {
+      bestDot = dot;
+      best = key;
+    }
+  }
+
+  return best;
+}
+
+function virtualOrbitDirectionFromDrag(
+  drag,
+  dx,
+  dy
+) {
+  const yaw = -dx * 0.0075;
+  const pitch = -dy * 0.0075;
+
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  const qYaw = new THREE.Quaternion()
+    .setFromAxisAngle(worldUp, yaw);
+
+  const direction = drag.startDirection
+    .clone()
+    .applyQuaternion(qYaw)
+    .normalize();
+
+  const right = drag.startRight
+    .clone()
+    .applyQuaternion(qYaw)
+    .normalize();
+
+  const qPitch = new THREE.Quaternion()
+    .setFromAxisAngle(right, pitch);
+
+  direction
+    .applyQuaternion(qPitch)
+    .normalize();
+
+  return direction;
+}
+
+function safePerspectiveDirection(direction) {
+  const dir = direction.clone().normalize();
+  const worldUp = new THREE.Vector3(0, 1, 0);
+
+  if (
+    Math.abs(dir.dot(worldUp)) > 0.9995
+  ) {
+    dir.z += dir.y >= 0
+      ? 0.001
+      : -0.001;
+
+    dir.normalize();
+  }
+
+  return dir;
 }
 
 function disposePreviewClone(root) {
   root?.traverse((node) => {
     if (!node.isMesh) return;
 
-    const materials = Array.isArray(node.material)
-      ? node.material
-      : [node.material];
+    const materials =
+      Array.isArray(node.material)
+        ? node.material
+        : [node.material];
 
-    materials.forEach((material) => material?.dispose?.());
+    materials.forEach(
+      (material) => material?.dispose?.()
+    );
   });
 }
