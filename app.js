@@ -211,6 +211,119 @@ function retargetPositionTrack(track, sourceRest, baseRest, unitRatio) {
   }
 }
 
+function findPrimarySkinnedMesh(object) {
+  let primary = null;
+  object.traverse((node) => {
+    if (!primary && node.isSkinnedMesh && node.skeleton?.bones?.length) {
+      primary = node;
+    }
+  });
+  return primary;
+}
+
+function findHipBoneName(skinnedMesh) {
+  const bones = skinnedMesh?.skeleton?.bones || [];
+  const exact = bones.find((bone) => /(^|[:_])hips?$/i.test(bone.name));
+  if (exact) return exact.name;
+
+  const loose = bones.find((bone) => /hips?/i.test(bone.name));
+  return loose?.name || bones[0]?.name || 'hip';
+}
+
+function extractRetargetedQuaternionTracks(record, baseAsset) {
+  const sourceAsset = state.assets.find((asset) => asset.id === record.sourceId) || null;
+  if (!sourceAsset || !baseAsset) return null;
+
+  // Do the matrix-based retarget on isolated clones. This avoids touching
+  // either the source FBX or the live preview/model base.
+  const sourceRoot = SkeletonUtils.clone(sourceAsset.object);
+  const targetRoot = SkeletonUtils.clone(baseAsset.object);
+
+  applyRestPose(sourceRoot, sourceAsset.restPose);
+  applyRestPose(targetRoot, baseAsset.restPose);
+
+  const sourceSkin = findPrimarySkinnedMesh(sourceRoot);
+  const targetSkin = findPrimarySkinnedMesh(targetRoot);
+  if (!sourceSkin || !targetSkin) return null;
+
+  sourceRoot.updateMatrixWorld(true);
+  targetRoot.updateMatrixWorld(true);
+
+  const hipName = findHipBoneName(targetSkin);
+
+  let retargeted;
+  try {
+    retargeted = SkeletonUtils.retargetClip(
+      targetSkin,
+      sourceSkin,
+      record.clip.clone(),
+      {
+        getBoneName: (bone) => bone.name,
+        hip: hipName,
+        preserveBonePositions: true,
+        preserveBoneMatrix: true,
+        useTargetMatrix: false,
+        hipInfluence: new THREE.Vector3(1, 1, 1),
+        // Position/root scale is already handled by our translation retarget.
+        // This clip is used only as the authoritative rotation source.
+        scale: 1,
+      }
+    );
+  } catch (error) {
+    console.warn('Retarget jerárquico de rotación falló; usando fallback local.', record.sourceFile, error);
+    return null;
+  }
+
+  const byBone = new Map();
+
+  for (const track of retargeted.tracks) {
+    if (!(track instanceof THREE.QuaternionKeyframeTrack)) continue;
+
+    let boneName = '';
+    const bonesMatch = track.name.match(/\.bones\[([^\]]+)\]\.quaternion$/);
+    if (bonesMatch) {
+      boneName = bonesMatch[1];
+    } else {
+      try {
+        boneName = THREE.PropertyBinding.parseTrackName(track.name).nodeName || '';
+      } catch {
+        boneName = '';
+      }
+    }
+
+    if (!boneName) continue;
+
+    byBone.set(boneName, new THREE.QuaternionKeyframeTrack(
+      boneName + '.quaternion',
+      track.times.slice(),
+      track.values.slice()
+    ));
+  }
+
+  return byBone.size ? byBone : null;
+}
+
+function replaceQuaternionTracksWithHierarchicalRetarget(record, baseAsset, clip) {
+  const rotationTracks = extractRetargetedQuaternionTracks(record, baseAsset);
+  if (!rotationTracks) return false;
+
+  clip.tracks = clip.tracks.map((track) => {
+    let parsed;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      return track;
+    }
+
+    if (parsed.propertyName !== 'quaternion') return track;
+
+    const replacement = rotationTracks.get(parsed.nodeName);
+    return replacement ? replacement.clone() : track;
+  });
+
+  return true;
+}
+
 function retargetQuaternionTrack(track, sourceRest, baseRest) {
   if (!sourceRest || !baseRest) return;
 
@@ -365,10 +478,31 @@ function makeClipForBase(record, baseAsset, usedNames = null) {
 
     if (parsed.propertyName === 'position') {
       retargetPositionTrack(track, sourceRest, baseRest, unitRatio);
-    } else if (parsed.propertyName === 'quaternion') {
-      retargetQuaternionTrack(track, sourceRest, baseRest);
     } else if (parsed.propertyName === 'scale') {
       retargetScaleTrack(track, sourceRest, baseRest);
+    }
+  }
+
+  // Rotation needs the whole hierarchy, not one bone at a time.
+  // SkeletonUtils evaluates parent/child world matrices frame by frame.
+  const hierarchicalRotationApplied =
+    replaceQuaternionTracksWithHierarchicalRetarget(record, baseAsset, clip);
+
+  if (!hierarchicalRotationApplied) {
+    // Fallback for unusual FBX files where a usable SkinnedMesh cannot be found.
+    for (const track of clip.tracks) {
+      let parsed;
+      try {
+        parsed = THREE.PropertyBinding.parseTrackName(track.name);
+      } catch {
+        continue;
+      }
+
+      if (parsed.propertyName !== 'quaternion') continue;
+
+      const sourceRest = sourceRestPose?.get(parsed.nodeName);
+      const baseRest = baseRestPose?.get(parsed.nodeName);
+      retargetQuaternionTrack(track, sourceRest, baseRest);
     }
   }
 
