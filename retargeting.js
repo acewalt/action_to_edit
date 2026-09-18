@@ -305,10 +305,19 @@ export async function buildRetargetClip({
   const sourceRoot = SkeletonUtils.clone(sourceAsset.object);
   const targetRoot = SkeletonUtils.clone(targetAsset.object);
 
+  // Mirror Action to Edit's preview hierarchy so per-Action whole-rig
+  // transforms are sampled by the retargeter too.
+  const sourceContainer = new THREE.Group();
+  sourceContainer.name = '__RetargetSourceContainer__';
+  const sourceActionTransform = new THREE.Group();
+  sourceActionTransform.name = '__ActionToEdit_ActionTransform__';
+  sourceContainer.add(sourceActionTransform);
+  sourceActionTransform.add(sourceRoot);
+
   applyRestPose(sourceRoot, sourceAsset.restPose);
   applyRestPose(targetRoot, targetAsset.restPose);
 
-  sourceRoot.updateMatrixWorld(true);
+  sourceContainer.updateMatrixWorld(true);
   targetRoot.updateMatrixWorld(true);
 
   const sourceBones = boneMap(sourceRoot);
@@ -348,8 +357,8 @@ export async function buildRetargetClip({
   const preparedClip = sourceClip.clone();
   preparedClip.resetDuration();
 
-  const sourceMixer = new THREE.AnimationMixer(sourceRoot);
-  const sourceAction = sourceMixer.clipAction(preparedClip, sourceRoot);
+  const sourceMixer = new THREE.AnimationMixer(sourceContainer);
+  const sourceAction = sourceMixer.clipAction(preparedClip, sourceContainer);
   sourceAction.enabled = true;
   sourceAction.setLoop(THREE.LoopOnce, 0);
   sourceAction.clampWhenFinished = true;
@@ -442,8 +451,11 @@ export async function buildRetargetClip({
     const time = sampleTimes[sampleIndex];
 
     applyRestPose(sourceRoot, sourceAsset.restPose);
+    sourceActionTransform.position.set(0, 0, 0);
+    sourceActionTransform.quaternion.identity();
+    sourceActionTransform.scale.set(1, 1, 1);
     sourceMixer.setTime(time);
-    sourceRoot.updateMatrixWorld(true);
+    sourceContainer.updateMatrixWorld(true);
 
     applyRestPose(targetRoot, targetAsset.restPose);
     targetRoot.updateMatrixWorld(true);
@@ -634,7 +646,7 @@ export async function buildRetargetClip({
   }
 
   sourceMixer.stopAllAction();
-  sourceMixer.uncacheRoot(sourceRoot);
+  sourceMixer.uncacheRoot(sourceContainer);
 
   const tracks = [];
   for (const [targetName, row] of output) {
