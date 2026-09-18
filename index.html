@@ -574,7 +574,15 @@
           <details class="retarget-details">
             <summary>FK → IK Mapping</summary>
             <div class="retarget-details-body">
-              <p class="retarget-note">Se conserva dentro del preset. En web se usa para identificar controles disponibles; el bake principal sigue siendo FK sobre huesos del FBX.</p>
+              <label class="retarget-check">
+                <input id="retargetEnableFkIkMapping" type="checkbox" />
+                <span>Usar FK → IK Mapping</span>
+              </label>
+              <p class="retarget-note">
+                Desactivado = bake FK puro para comprobar primero el targeting de los FK.
+                Activado = permite la segunda etapa FK → IK; “Auto-bake IK on Apply” decide si se hornea al aplicar.
+              </p>
+              <div id="retargetFkDiagnostic" class="retarget-note">FK: pendiente de analizar.</div>
               <div id="retargetIkChains" class="retarget-ik-list"></div>
             </div>
           </details>
