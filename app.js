@@ -220,8 +220,36 @@ function getBaseAsset() {
   return state.assets.find((asset) => asset.id === state.baseAssetId) || null;
 }
 
+const actionNameCollator = new Intl.Collator('es', {
+  sensitivity: 'base',
+  numeric: true,
+});
+
+function compareActionRecords(a, b) {
+  const byName = actionNameCollator.compare(
+    String(a?.name || ''),
+    String(b?.name || '')
+  );
+  if (byName !== 0) return byName;
+
+  const bySource = actionNameCollator.compare(
+    String(a?.sourceFile || ''),
+    String(b?.sourceFile || '')
+  );
+  if (bySource !== 0) return bySource;
+
+  // Stable deterministic fallback for exact duplicates.
+  return String(a?.id || '').localeCompare(String(b?.id || ''));
+}
+
+function sortActionRecords(records) {
+  return [...records].sort(compareActionRecords);
+}
+
 function getIncludedClips() {
-  return state.clips.filter((record) => record.include);
+  return sortActionRecords(
+    state.clips.filter((record) => record.include)
+  );
 }
 
 function isEmptyClip(record) {
@@ -1196,9 +1224,14 @@ function renderActions() {
     return record.name.toLowerCase().includes(query) || record.sourceFile.toLowerCase().includes(query);
   });
 
-  // Dos grupos físicos: las actions útiles SIEMPRE primero; las vacías SIEMPRE al final.
-  const usefulActions = filtered.filter((record) => !isEmptyClip(record));
-  const emptyActions = filtered.filter((record) => isEmptyClip(record));
+  // Dos grupos físicos: actions con tracks primero y "Sin tracks" al final.
+  // Ambos grupos se ordenan siempre alfabéticamente por el nombre ACTUAL.
+  const usefulActions = sortActionRecords(
+    filtered.filter((record) => !isEmptyClip(record))
+  );
+  const emptyActions = sortActionRecords(
+    filtered.filter((record) => isEmptyClip(record))
+  );
   const visible = [...usefulActions, ...emptyActions];
 
   const compatibleCount = getFullyCompatibleClips(base).length;
@@ -1264,8 +1297,15 @@ function renderActions() {
       if (record.id === state.activeClipId) {
         els.activeActionBadge.textContent = record.name;
       }
-      setStatus('Action renombrada a "' + record.name + '".', 'ok');
-      updateExportState();
+
+      // Rebuild immediately: alphabetical order follows the NEW name.
+      renderActions();
+      renderMotionPanel();
+
+      setStatus(
+        'Action renombrada a "' + record.name + '" · lista reordenada alfabéticamente.',
+        'ok'
+      );
     };
 
     const cancelRename = () => {
@@ -2448,8 +2488,10 @@ els.renameCompatibleActionsBtn.addEventListener('click', () => {
   }
 
   renderActions();
+  renderMotionPanel();
   setStatus(
-    'Renombradas ' + compatible.length + ' Actions 100% compatibles usando el nombre de su FBX.',
+    'Renombradas ' + compatible.length +
+    ' Actions 100% compatibles usando el nombre de su FBX · orden alfabético actualizado.',
     'ok'
   );
 });
