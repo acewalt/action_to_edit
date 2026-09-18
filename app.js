@@ -1696,7 +1696,7 @@ function beginBlenderAxisSnap(event) {
   } catch {}
 
   setStatus(
-    'Alt + MMB: arrastra hacia una dirección para saltar a una vista ortográfica.',
+    'Alt + MMB: snap ortográfico. Arrastra hacia una dirección para elegir el eje.',
     'info'
   );
 }
@@ -1719,7 +1719,7 @@ function updateBlenderAxisSnap(event) {
   if (axisView === drag.lastAxis) return;
 
   drag.lastAxis = axisView;
-  switchToAxisView(axisView);
+  switchToAxisView(axisView, { returnMode: 'orthographic' });
 }
 
 function endBlenderAxisSnap(event) {
@@ -1741,14 +1741,15 @@ function endBlenderAxisSnap(event) {
   flushOrbitControls();
 }
 
-function switchToAxisView(axisView) {
+function switchToAxisView(axisView, options = {}) {
   const def = axisViewDefinition(axisView);
   const target = controls.target.clone();
 
-  // Remember the mode the user was actually working in before entering the
-  // temporary axis-aligned view. Clicking another axis while already snapped
-  // must preserve that original mode.
-  if (!state.axisViewActive) {
+  // Gimbal click: remember the mode the user was working in.
+  // Alt+MMB may explicitly force an orthographic workflow.
+  if (options.returnMode) {
+    state.axisViewReturnMode = options.returnMode;
+  } else if (!state.axisViewActive) {
     state.axisViewReturnMode = camera.isPerspectiveCamera
       ? 'perspective'
       : 'orthographic';
@@ -1793,7 +1794,8 @@ function handleAxisViewAutoProjection() {
     !state.axisViewActive ||
     !state.axisViewQuaternion ||
     state.axisAutoSwitchPending ||
-    state.rootGizmoDragging
+    state.rootGizmoDragging ||
+    state.blenderNavDrag
   ) {
     return;
   }
