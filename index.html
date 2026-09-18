@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-32" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-36" />
   <script type="importmap">
   {
     "imports": {
@@ -498,6 +498,7 @@
                   <option value="world">Global</option>
                 </select>
               </label>
+              <button id="retargetRestCopyMirrorBtn" class="retarget-small-button" type="button" title="Copia la rotación del hueso seleccionado al hueso equivalente del lado opuesto, espejada">Copy Selected Bone</button>
               <button id="retargetRestResetBoneBtn" class="retarget-small-button" type="button">Reset Bone</button>
               <button id="retargetRestResetAllBtn" class="retarget-small-button" type="button">Reset Pose</button>
               <button id="retargetRestFitBtn" class="retarget-small-button" type="button">Encuadrar</button>
@@ -507,7 +508,7 @@
             <div id="retargetRestViewport" class="retarget-rest-viewport">
               <div class="retarget-rest-help">
                 <strong>Editar Rest Pose</strong>
-                <span>Selecciona un hueso en el desplegable o haz clic sobre un punto del esqueleto Source. Usa el gizmo para rotarlo/moverlo.</span>
+                <span>MMB orbita · Shift+MMB desplaza · Ctrl+MMB zoom · Alt+MMB cambia a vistas ortográficas. Los controles grandes del Source sirven para seleccionar y posar el rig.</span>
               </div>
               <div id="retargetRestViewportBadge" class="retarget-rest-badge">Sin pose redefinida</div>
             </div>
@@ -644,6 +645,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-35"></script>
+  <script type="module" src="./app.js?v=20260918-36"></script>
 </body>
 </html>
