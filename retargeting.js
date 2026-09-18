@@ -149,6 +149,22 @@ export function resolveBoneName(shortName, boneNames, prefix = '') {
     if (prefixedInsensitive) return prefixedInsensitive;
   }
 
+  // THREE.FBXLoader sanitizes names used for animation binding:
+  // "mixamorig1:LeftArm" becomes "mixamorig1LeftArm" and
+  // "FK-UpperArm.L" becomes "FK-UpperArmL".
+  // Compare their normalized binding names before semantic matching.
+  const normalizedExpected = normalizeExactBoneName(shortName);
+  if (normalizedExpected) {
+    const normalizedCandidate = [...set].find((name) => {
+      const stripped = stripPrefix(name, prefix);
+      return (
+        normalizeExactBoneName(stripped) === normalizedExpected ||
+        normalizeExactBoneName(name) === normalizedExpected
+      );
+    });
+    if (normalizedCandidate) return normalizedCandidate;
+  }
+
   // Browser adaptation: Blender presets often point at FK/control bones.
   // FBX exports may rename or omit those controls while keeping an equivalent
   // deform bone. Fall back to a semantic body-role match.
