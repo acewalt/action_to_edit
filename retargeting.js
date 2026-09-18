@@ -363,6 +363,7 @@ export async function buildRetargetClip({
   targetPrefix = '',
   autoScale = true,
   useWorldLocation = false,
+  transferRootMotion = false,
   sampleFps = 30,
   sourceRestMode = 'original',
   sourceRestRotationOnly = true,
@@ -562,7 +563,9 @@ export async function buildRetargetClip({
       quaternionValues: [],
       positionValues: [],
       needsRotation: group.some((pair) => hasRotationChannel(pair.channels)),
-      needsLocation: group.some((pair) => hasLocationChannel(pair.channels)),
+      needsLocation:
+        transferRootMotion &&
+        group.some((pair) => hasLocationChannel(pair.channels)),
       previousQuaternion: null,
     });
   }
@@ -636,7 +639,7 @@ export async function buildRetargetClip({
             .normalize();
         }
 
-        if (hasLocationChannel(pair.channels)) {
+        if (transferRootMotion && hasLocationChannel(pair.channels)) {
           const axes = blenderAxesToThreeWorld(pair.axes);
           const pairScale =
             Number.isFinite(Number(pair.loc_scale))
@@ -781,7 +784,10 @@ export async function buildRetargetClip({
             .add(localDelta);
       }
 
-      if (group.some((pair) => hasLocationChannel(pair.channels))) {
+      if (
+        transferRootMotion &&
+        group.some((pair) => hasLocationChannel(pair.channels))
+      ) {
         targetBone.position.copy(nextLocalPosition);
       }
 
@@ -874,67 +880,10 @@ export async function buildRetargetClip({
     throw new Error('El retarget no produjo tracks.');
   }
 
-  // STRICT TARGET REST BASELINE
-  // --------------------------------
-  // A retargeted Action must be independent from whichever Action the target
-  // happened to play before it. Three.js clips are sparse: an unkeyed channel
-  // can otherwise remain at a stale value until another clip writes it.
-  //
-  // Bake constant rest tracks for every bone that can influence the skin
-  // (directly weighted OR an ancestor carrier). Animated channels keep the
-  // retarget data; missing channels are forced to the imported target rest.
-  const keyed = new Map();
-
-  for (const track of tracks) {
-    let parsed = null;
-    try {
-      parsed = THREE.PropertyBinding.parseTrackName(track.name);
-    } catch {
-      parsed = null;
-    }
-
-    if (!parsed?.nodeName || !parsed?.propertyName) continue;
-
-    if (!keyed.has(parsed.nodeName)) {
-      keyed.set(parsed.nodeName, new Set());
-    }
-
-    keyed.get(parsed.nodeName).add(parsed.propertyName);
-  }
-
-  const baselineTimes = [0, duration];
-
-  for (const boneName of influentialTargetBones) {
-    const rest = targetRest.get(boneName);
-    if (!rest) continue;
-
-    const channels = keyed.get(boneName) || new Set();
-
-    if (!channels.has('position')) {
-      const p = rest.localPosition;
-      tracks.push(new THREE.VectorKeyframeTrack(
-        boneName + '.position',
-        baselineTimes,
-        [p.x, p.y, p.z, p.x, p.y, p.z]
-      ));
-    }
-
-    if (!channels.has('quaternion')) {
-      const q = rest.localQuaternion.clone().normalize();
-      tracks.push(new THREE.QuaternionKeyframeTrack(
-        boneName + '.quaternion',
-        baselineTimes,
-        [q.x, q.y, q.z, q.w, q.x, q.y, q.z, q.w]
-      ));
-    }
-
-    // IMPORTANT: do not bake a constant .scale baseline here.
-    // CloudRig/Rigify/ARP FBX exports commonly use inverse-bind/control scales
-    // such as 0.01/100 that are not the animation hierarchy scale. Writing
-    // those values into an AnimationClip is what made retarget results become
-    // gigantic. Position/quaternion are isolated; scale stays owned by the
-    // imported Target FBX hierarchy.
-  }
+  // Retarget clips stay intentionally sparse.
+  // Playback restores the Target to its true bind/rest pose before evaluating
+  // this clip, so unmapped bones inherit the correct clean pose without
+  // embedding control-rig bind positions/quaternions into the Action.
 
   const clip = new THREE.AnimationClip(clipName, duration, tracks);
   clip.resetDuration();
@@ -967,8 +916,16 @@ export async function buildRetargetClip({
         })),
       weightedTargetBoneCount: weightedTargetBones.size,
       influentialTargetBoneCount: influentialTargetBones.size,
-      restBaselineBoneCount: influentialTargetBones.size,
-      restBaselineMode: 'bind-pose-no-scale',
+      restBaselineBoneCount: 0,
+      restBaselineMode: 'external-bind-pose',
+      generatedTrackCount: tracks.length,
+      generatedRotationTracks: tracks.filter((track) =>
+        track.name.endsWith('.quaternion')
+      ).length,
+      generatedPositionTracks: tracks.filter((track) =>
+        track.name.endsWith('.position')
+      ).length,
+      transferRootMotion: Boolean(transferRootMotion),
       fkRequestedPairs,
       fkResolvedPairs,
       ikBakedChains: ikBake.chains.length,
