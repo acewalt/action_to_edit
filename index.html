@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#101216" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260917-6" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-1" />
   <script type="importmap">
   {
     "imports": {
@@ -71,12 +71,89 @@
               <span id="activeActionBadge" class="pill muted">Sin acción</span>
             </div>
             <div class="toolbar-actions">
+              <button id="toggleMotionPanelBtn" class="icon-button" type="button">Ajustes</button>
               <button id="toggleSkeletonBtn" class="icon-button" type="button" disabled>Esqueleto</button>
               <button id="fitCameraBtn" class="icon-button" type="button" disabled>Encuadrar</button>
             </div>
           </div>
 
           <div id="viewport" class="viewport">
+            <aside id="motionPanel" class="motion-panel">
+              <div class="motion-panel-header">
+                <div>
+                  <strong>Ajustes de Action</strong>
+                  <span id="motionPanelActionName">Selecciona una Action</span>
+                </div>
+                <button id="resetMotionPanelBtn" class="motion-reset-all" type="button" disabled>Reset</button>
+              </div>
+
+              <div id="motionPanelBody" class="motion-panel-body is-disabled">
+                <div class="motion-control">
+                  <div class="motion-control-head">
+                    <label for="overdriveRange">Overdrive</label>
+                    <output id="overdriveValue">50</output>
+                  </div>
+                  <input id="overdriveRange" type="range" min="0" max="100" step="1" value="50" />
+                  <small>50 = movimiento original</small>
+                </div>
+
+                <div class="motion-control">
+                  <div class="motion-control-head">
+                    <label for="armSpaceRange">Character Arm-Space</label>
+                    <output id="armSpaceValue">50</output>
+                  </div>
+                  <input id="armSpaceRange" type="range" min="0" max="100" step="1" value="50" />
+                  <small>50 = brazos originales</small>
+                </div>
+
+                <div class="motion-control trim-control">
+                  <div class="motion-control-head">
+                    <div>
+                      <label>Trim</label>
+                      <span id="trimFramesLabel">0 total Frames</span>
+                    </div>
+                    <button id="resetTrimBtn" class="mini-reset" type="button">Reset</button>
+                  </div>
+                  <div class="dual-range">
+                    <div class="dual-range-track"></div>
+                    <div id="trimRangeFill" class="dual-range-fill"></div>
+                    <input id="trimStartRange" class="dual-range-input" type="range" min="0" max="100" step="1" value="0" />
+                    <input id="trimEndRange" class="dual-range-input" type="range" min="0" max="100" step="1" value="100" />
+                  </div>
+                  <div class="range-limits"><span id="trimStartValue">0</span><span id="trimEndValue">100</span></div>
+                </div>
+
+                <label class="motion-check">
+                  <input id="mirrorActionCheckbox" type="checkbox" />
+                  <span>Mirror</span>
+                </label>
+
+                <div class="motion-divider"></div>
+
+                <div class="root-offset-section">
+                  <div class="motion-control-head">
+                    <div>
+                      <label for="rootTargetSelect">Root / Main bone</label>
+                      <span id="rootResolvedName">Auto</span>
+                    </div>
+                    <button id="resetRootOffsetBtn" class="mini-reset" type="button">Reset offset</button>
+                  </div>
+
+                  <select id="rootTargetSelect" class="motion-select">
+                    <option value="auto">Auto · Hips</option>
+                    <option value="object">Objeto root</option>
+                  </select>
+
+                  <div class="offset-grid">
+                    <label><span>X</span><input id="rootOffsetX" type="number" step="0.1" value="0" /></label>
+                    <label><span>Y</span><input id="rootOffsetY" type="number" step="0.1" value="0" /></label>
+                    <label><span>Z</span><input id="rootOffsetZ" type="number" step="0.1" value="0" /></label>
+                  </div>
+                  <small>Offset local por Action · unidades del FBX</small>
+                </div>
+              </div>
+            </aside>
+
             <div id="viewportEmpty" class="viewport-empty">
               <div class="empty-cube">◇</div>
               <strong>Vista previa 3D</strong>
@@ -206,6 +283,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260917-13"></script>
+  <script type="module" src="./app.js?v=20260918-1"></script>
 </body>
 </html>
