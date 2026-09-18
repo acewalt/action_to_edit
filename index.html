@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#101216" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-3" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-5" />
   <script type="importmap">
   {
     "imports": {
@@ -78,6 +78,27 @@
           </div>
 
           <div id="viewport" class="viewport">
+            <div class="view-navigation" aria-label="Navegación de vista">
+              <button id="toggleProjectionBtn" class="projection-toggle" type="button" title="Alternar Perspectiva / Ortográfica">Perspectiva</button>
+              <div id="viewGizmo" class="view-gizmo" aria-label="Gimbal de navegación">
+                <svg class="view-gizmo-lines" viewBox="0 0 86 86" aria-hidden="true">
+                  <line id="navLineXNeg" x1="43" y1="43" x2="18" y2="43"></line>
+                  <line id="navLineYNeg" x1="43" y1="43" x2="43" y2="68"></line>
+                  <line id="navLineZNeg" x1="43" y1="43" x2="43" y2="18"></line>
+                  <line id="navLineX" x1="43" y1="43" x2="68" y2="43"></line>
+                  <line id="navLineY" x1="43" y1="43" x2="43" y2="18"></line>
+                  <line id="navLineZ" x1="43" y1="43" x2="18" y2="43"></line>
+                </svg>
+                <span class="view-gizmo-center"></span>
+                <button class="view-axis view-axis-neg axis-x" type="button" data-axis-view="-x" title="Vista -X"></button>
+                <button class="view-axis view-axis-neg axis-y" type="button" data-axis-view="-y" title="Vista -Y"></button>
+                <button class="view-axis view-axis-neg axis-z" type="button" data-axis-view="-z" title="Vista -Z"></button>
+                <button class="view-axis axis-x" type="button" data-axis-view="+x" title="Vista +X">X</button>
+                <button class="view-axis axis-y" type="button" data-axis-view="+y" title="Vista +Y">Y</button>
+                <button class="view-axis axis-z" type="button" data-axis-view="+z" title="Vista +Z">Z</button>
+              </div>
+            </div>
+
             <aside id="motionPanel" class="motion-panel">
               <div class="motion-panel-header">
                 <div>
@@ -297,6 +318,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-4"></script>
+  <script type="module" src="./app.js?v=20260918-5"></script>
 </body>
 </html>
