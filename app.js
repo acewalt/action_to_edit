@@ -2268,7 +2268,15 @@ async function exportGLB() {
 
 function clearAll() {
   const base = getBaseAsset();
-  if (base && base.object.parent === previewStage) previewStage.remove(base.object);
+  if (base && base.object.parent === state.actionTransformNode) {
+    state.actionTransformNode.remove(base.object);
+  }
+
+  state.actionTransformNode.position.set(0, 0, 0);
+  state.actionTransformNode.quaternion.identity();
+  state.actionTransformNode.scale.set(1, 1, 1);
+  state.actionTransformNode.updateMatrixWorld(true);
+
   disposeMixer();
   if (state.skeletonHelper) {
     scene.remove(state.skeletonHelper);
