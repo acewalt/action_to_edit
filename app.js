@@ -2942,10 +2942,41 @@ els.toggleSkeletonBtn.addEventListener('click', () => {
   if (state.skeletonHelper) state.skeletonHelper.visible = state.skeletonVisible;
   els.toggleSkeletonBtn.textContent = state.skeletonVisible ? 'Ocultar huesos' : 'Esqueleto';
 });
-els.playPauseBtn.addEventListener('click', () => {
-  if (!state.currentAction) return;
+function togglePlaybackPause() {
+  if (!state.currentAction) return false;
+
   state.currentAction.paused = !state.currentAction.paused;
   els.playPauseBtn.textContent = state.currentAction.paused ? '▶' : 'Ⅱ';
+
+  setStatus(
+    state.currentAction.paused ? 'Animación pausada.' : 'Animación reanudada.',
+    'info'
+  );
+
+  return true;
+}
+
+els.playPauseBtn.addEventListener('click', () => {
+  togglePlaybackPause();
+});
+
+window.addEventListener('keydown', (event) => {
+  if (event.code !== 'Space' || event.repeat) return;
+
+  const active = document.activeElement;
+  const tag = active?.tagName?.toLowerCase();
+  const isTyping =
+    tag === 'input' ||
+    tag === 'textarea' ||
+    tag === 'select' ||
+    active?.isContentEditable;
+
+  if (isTyping) return;
+
+  if (togglePlaybackPause()) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
 });
 els.speedSelect.addEventListener('change', () => {
   if (state.mixer) state.mixer.timeScale = Number(els.speedSelect.value);
