@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-48" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-49" />
   <script type="importmap">
   {
     "imports": {
@@ -530,6 +530,11 @@
               <span>Read Source Location in World Space</span>
             </label>
             <label class="retarget-check">
+              <input id="retargetTransferRootMotion" type="checkbox" />
+              <span>Transferir Root Motion</span>
+            </label>
+            <p class="retarget-note">Desactivado: el retarget FK queda centrado y solo transfiere rotaciones. Actívalo después de verificar que el FK funciona.</p>
+            <label class="retarget-check">
               <input id="retargetAutoBakeIk" type="checkbox" />
               <span>Auto-bake IK on Apply</span>
             </label>
@@ -653,6 +658,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-48"></script>
+  <script type="module" src="./app.js?v=20260918-49"></script>
 </body>
 </html>
