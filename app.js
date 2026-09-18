@@ -18,7 +18,7 @@ import {
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
 } from './retargeting.js?v=20260918-35';
-import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-31';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-36';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -144,6 +144,7 @@ const els = {
   retargetRestRotateBtn: $('#retargetRestRotateBtn'),
   retargetRestMoveBtn: $('#retargetRestMoveBtn'),
   retargetRestSpaceSelect: $('#retargetRestSpaceSelect'),
+  retargetRestCopyMirrorBtn: $('#retargetRestCopyMirrorBtn'),
   retargetRestResetBoneBtn: $('#retargetRestResetBoneBtn'),
   retargetRestResetAllBtn: $('#retargetRestResetAllBtn'),
   retargetRestFitBtn: $('#retargetRestFitBtn'),
@@ -5789,6 +5790,27 @@ els.retargetRestMoveBtn.addEventListener('click', () => {
 
 els.retargetRestSpaceSelect.addEventListener('change', () => {
   state.retargetRestEditor?.setSpace(els.retargetRestSpaceSelect.value);
+});
+
+els.retargetRestCopyMirrorBtn.addEventListener('click', () => {
+  const editor = state.retargetRestEditor;
+  if (!editor) return;
+
+  const result = editor.copySelectedToOpposite?.();
+  if (!result?.ok) {
+    setRetargetProgress(
+      0,
+      result?.message || 'No se encontró el hueso equivalente del lado opuesto.'
+    );
+    return;
+  }
+
+  state.retargetRestEditorDirty = true;
+  updateRetargetRestBadge();
+  setRetargetProgress(
+    0,
+    'Rotación espejada: ' + result.source + ' → ' + result.target + '.'
+  );
 });
 
 els.retargetRestResetBoneBtn.addEventListener('click', () => {
