@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#101216" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-1" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-3" />
   <script type="importmap">
   {
     "imports": {
@@ -143,6 +143,20 @@
                     <option value="auto">Auto · Hips</option>
                     <option value="object">Objeto root</option>
                   </select>
+
+                  <div class="gizmo-tool-row">
+                    <button id="toggleRootGizmoBtn" class="gizmo-tool-button" type="button">Mover en viewport</button>
+                    <label class="gizmo-snap-control">
+                      <span>Precisión</span>
+                      <select id="rootGizmoSnap">
+                        <option value="0.1">0.1</option>
+                        <option value="0.25">0.25</option>
+                        <option value="0.5" selected>0.5</option>
+                        <option value="1">1.0</option>
+                      </select>
+                    </label>
+                  </div>
+                  <small class="gizmo-help">Arrastra los ejes X/Y/Z en el visor. El movimiento se ajusta al paso elegido para evitar cambios demasiado sensibles.</small>
 
                   <div class="offset-grid">
                     <label><span>X</span><input id="rootOffsetX" type="number" step="0.1" value="0" /></label>
@@ -283,6 +297,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-2"></script>
+  <script type="module" src="./app.js?v=20260918-3"></script>
 </body>
 </html>
