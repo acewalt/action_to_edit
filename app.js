@@ -93,6 +93,7 @@ const els = {
   limbRotationY: $('#limbRotationY'),
   limbRotationZ: $('#limbRotationZ'),
   resetLimbOffsetBtn: $('#resetLimbOffsetBtn'),
+  toggleShadingBtn: $('#toggleShadingBtn'),
   toggleSkeletonBtn: $('#toggleSkeletonBtn'),
   fitCameraBtn: $('#fitCameraBtn'),
   statusBar: $('#statusBar'),
@@ -178,6 +179,7 @@ const state = {
   previewClip: null,
   skeletonHelper: null,
   skeletonVisible: false,
+  viewportShadingMode: 'material',
   previewStage: null,
   actionTransformNode: null,
   projectionMode: 'perspective',
@@ -352,6 +354,63 @@ scene.add(key);
 const rim = new THREE.DirectionalLight(0x9fb8ff, 1.2);
 rim.position.set(-4, 3, -5);
 scene.add(rim);
+
+// Viewport-only Solid mode. The real imported materials are never permanently
+// replaced: they are swapped only while renderer.render() is executing and are
+// restored immediately afterwards. Export and retargeting therefore keep the
+// original FBX materials/textures even if Solid is enabled.
+const solidViewportMaterial = new THREE.MeshStandardMaterial({
+  name: '__ActionToEdit_SolidViewportMaterial__',
+  color: 0xaeb6bf,
+  roughness: 0.82,
+  metalness: 0.0,
+  side: THREE.DoubleSide,
+});
+
+function updateViewportShadingUi() {
+  const hasBase = Boolean(getBaseAsset());
+  const solid = state.viewportShadingMode === 'solid';
+
+  els.toggleShadingBtn.disabled = !hasBase;
+  els.toggleShadingBtn.classList.toggle('active', solid);
+  els.toggleShadingBtn.setAttribute('aria-pressed', String(solid));
+  els.toggleShadingBtn.textContent = solid ? 'Sólido ✓' : 'Sólido';
+  els.toggleShadingBtn.title = solid
+    ? 'Volver a ver materiales y texturas'
+    : 'Ver el modelo sin materiales ni texturas';
+}
+
+function renderMainViewport() {
+  const base = getBaseAsset();
+
+  if (!base || state.viewportShadingMode !== 'solid') {
+    renderer.render(scene, camera);
+    return;
+  }
+
+  const swaps = [];
+
+  base.object.traverse((node) => {
+    if (!node.isMesh) return;
+
+    const original = node.material;
+    swaps.push([node, original]);
+
+    // Preserve multi-material geometry groups while replacing every slot with
+    // the same neutral viewport material.
+    node.material = Array.isArray(original)
+      ? original.map(() => solidViewportMaterial)
+      : solidViewportMaterial;
+  });
+
+  try {
+    renderer.render(scene, camera);
+  } finally {
+    for (const [node, original] of swaps) {
+      node.material = original;
+    }
+  }
+}
 
 const grid = new THREE.GridHelper(20, 20, 0x39414c, 0x222830);
 grid.position.y = 0;
@@ -2430,6 +2489,7 @@ function setBaseAsset(assetId) {
   els.baseBadge.textContent = next.file.name;
   els.toggleSkeletonBtn.disabled = false;
   els.fitCameraBtn.disabled = false;
+  updateViewportShadingUi();
   resetPlaybackUi();
   fitCameraToObject(next.object);
   renderAssets();
@@ -2477,6 +2537,7 @@ function updateViewportEmpty() {
   els.baseBadge.textContent = base ? base.file.name : 'Sin modelo base';
   els.toggleSkeletonBtn.disabled = !base;
   els.fitCameraBtn.disabled = !base;
+  updateViewportShadingUi();
   updateExportState();
 }
 
@@ -4358,6 +4419,24 @@ els.fitCameraBtn.addEventListener('click', () => {
 
   setStatus('Vista restablecida: perspectiva original y modelo encuadrado.', 'ok');
 });
+els.toggleShadingBtn.addEventListener('click', () => {
+  if (!getBaseAsset()) return;
+
+  state.viewportShadingMode =
+    state.viewportShadingMode === 'solid'
+      ? 'material'
+      : 'solid';
+
+  updateViewportShadingUi();
+
+  setStatus(
+    state.viewportShadingMode === 'solid'
+      ? 'Modo Sólido activo: materiales y texturas ocultos solo en el viewport.'
+      : 'Modo Material activo: materiales y texturas visibles.',
+    'info'
+  );
+});
+
 els.toggleSkeletonBtn.addEventListener('click', () => {
   state.skeletonVisible = !state.skeletonVisible;
   if (state.skeletonHelper) state.skeletonHelper.visible = state.skeletonVisible;
@@ -5850,7 +5929,7 @@ function animate() {
     els.currentTime.textContent = formatDuration(time);
   }
 
-  renderer.render(scene, camera);
+  renderMainViewport();
 }
 animate();
 
