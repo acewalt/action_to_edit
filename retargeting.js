@@ -515,13 +515,35 @@ export async function buildRetargetClip({
         skipped: [],
       };
 
+  // FBX files do not always share the same raw up/front convention.
+  // The Rest Pose viewport already normalizes both rigs visually; the bake
+  // must use the same canonical humanoid frame or a matched T-pose can still
+  // retarget 90 degrees onto its back.
+  const sourceHumanoidFrame =
+    computeHumanoidFrameFromPose(sourceRest);
+  const targetHumanoidFrame =
+    computeHumanoidFrameFromPose(targetRest);
+
+  const sourceToCanonicalQ =
+    sourceHumanoidFrame.basis.clone().invert();
+  const canonicalToTargetQ =
+    targetHumanoidFrame.basis.clone();
+
+  const sourceToTargetQ =
+    canonicalToTargetQ
+      .clone()
+      .multiply(sourceToCanonicalQ)
+      .normalize();
+
   const sourceHeight = computeRigHeightFromPose(
     sourceRest,
-    new Set(runtimePairs.map((pair) => pair.sourceName))
+    new Set(runtimePairs.map((pair) => pair.sourceName)),
+    sourceToCanonicalQ
   );
   const targetHeight = computeRigHeightFromPose(
     targetRest,
-    new Set(runtimePairs.map((pair) => pair.targetName))
+    new Set(runtimePairs.map((pair) => pair.targetName)),
+    targetHumanoidFrame.basis.clone().invert()
   );
   const scaleRatio =
     autoScale && sourceHeight > 1e-8 && targetHeight > 1e-8
@@ -625,8 +647,15 @@ export async function buildRetargetClip({
             deltaAdjusted = identity.clone().slerp(deltaAdjusted, pair.influence).normalize();
           }
 
-          desiredWorldQuaternion = deltaAdjusted
+          // Convert source world delta through the canonical humanoid
+          // frame before applying it to the target raw FBX frame.
+          const targetDelta = sourceToTargetQ
             .clone()
+            .multiply(deltaAdjusted)
+            .multiply(sourceToTargetQ.clone().invert())
+            .normalize();
+
+          desiredWorldQuaternion = targetDelta
             .multiply(targetRestEntry.worldQuaternion)
             .normalize();
         }
@@ -730,28 +759,42 @@ export async function buildRetargetClip({
                 .multiplyScalar(scaleRatio * pairScale);
             }
 
-            applyAxesMask(worldContribution, axes);
+            // BlendCap axis masks are world-space components. Filter in
+            // canonical humanoid space, then convert to target raw FBX world.
+            const canonicalContribution =
+              worldContribution
+                .clone()
+                .applyQuaternion(sourceToCanonicalQ);
+
+            applyAxesMask(
+              canonicalContribution,
+              axes
+            );
 
             if (pair.influence < 0.999999) {
-              worldContribution.multiplyScalar(pair.influence);
+              canonicalContribution.multiplyScalar(
+                pair.influence
+              );
             }
 
             if (!worldLocationAccum) {
-              worldLocationAccum = new THREE.Vector3();
+              worldLocationAccum =
+                new THREE.Vector3();
             }
 
-            // BlendCap treats partial axes as WORLD components. Multiple
-            // split-axis rows targeting the same effective deform bone compose.
             if (axes.includes('X')) {
-              worldLocationAccum.x = worldContribution.x;
+              worldLocationAccum.x =
+                canonicalContribution.x;
               wroteWorldLocation = true;
             }
             if (axes.includes('Y')) {
-              worldLocationAccum.y = worldContribution.y;
+              worldLocationAccum.y =
+                canonicalContribution.y;
               wroteWorldLocation = true;
             }
             if (axes.includes('Z')) {
-              worldLocationAccum.z = worldContribution.z;
+              worldLocationAccum.z =
+                canonicalContribution.z;
               wroteWorldLocation = true;
             }
           }
@@ -767,9 +810,13 @@ export async function buildRetargetClip({
             )
             .invert();
 
-        const localDelta =
+        const targetWorldDelta =
           worldLocationAccum
             .clone()
+            .applyQuaternion(canonicalToTargetQ);
+
+        const localDelta =
+          targetWorldDelta
             .applyMatrix3(parentLinearInv);
 
         nextLocalPosition =
@@ -946,6 +993,16 @@ export async function buildRetargetClip({
       invalidPairs: invalid,
       sampleCount: sampleTimes.length,
       scaleRatio,
+      humanoidFrameCorrectionDegrees:
+        THREE.MathUtils.radToDeg(
+          2 * Math.acos(
+            clamp(
+              Math.abs(sourceToTargetQ.w),
+              -1,
+              1
+            )
+          )
+        ),
       sourceHead: resolvedHeadSource,
       targetHead: resolvedHeadTarget,
       mappedBones: targetOrder,
@@ -1954,15 +2011,153 @@ function blenderAxesToThreeWorld(value) {
   return normalizeAxes(out);
 }
 
-function computeRigHeightFromPose(pose, includedNames = null) {
+function computeHumanoidFrameFromPose(pose) {
+  const entries = [...(pose?.entries?.() || [])];
+
+  const bestEntry = (semantic) => {
+    let best = null;
+    let bestScore = -Infinity;
+
+    for (const [name, entry] of entries) {
+      if (semanticBoneKey(name) !== semantic) continue;
+
+      const n = String(name || '').toLowerCase();
+      let score = 0;
+
+      if (/^mixamorig/.test(n)) score += 100;
+      if (/^def[-_:]/.test(n)) score += 90;
+      if (/^fk[-_:]/.test(n)) score += 80;
+
+      if (/(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|ik-|hng|p-str|str-|twist|tweak|roll)/i.test(n)) {
+        score -= 100;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = entry;
+      }
+    }
+
+    return best;
+  };
+
+  const hips =
+    bestEntry('hips') ||
+    bestEntry('spine');
+
+  const head =
+    bestEntry('head') ||
+    bestEntry('neck');
+
+  if (!hips || !head) {
+    return {
+      basis: new THREE.Quaternion(),
+      up: new THREE.Vector3(0, 1, 0),
+      right: new THREE.Vector3(1, 0, 0),
+      forward: new THREE.Vector3(0, 0, 1),
+    };
+  }
+
+  const up =
+    head.worldPosition
+      .clone()
+      .sub(hips.worldPosition);
+
+  if (up.lengthSq() < 1e-10) {
+    up.set(0, 1, 0);
+  } else {
+    up.normalize();
+  }
+
+  const left =
+    bestEntry('leftshoulder') ||
+    bestEntry('leftthigh');
+
+  const right =
+    bestEntry('rightshoulder') ||
+    bestEntry('rightthigh');
+
+  const rightAxis =
+    new THREE.Vector3(1, 0, 0);
+
+  if (left && right) {
+    rightAxis
+      .copy(right.worldPosition)
+      .sub(left.worldPosition);
+  }
+
+  rightAxis.addScaledVector(
+    up,
+    -rightAxis.dot(up)
+  );
+
+  if (rightAxis.lengthSq() < 1e-10) {
+    rightAxis.set(1, 0, 0);
+  } else {
+    rightAxis.normalize();
+  }
+
+  const forward =
+    new THREE.Vector3()
+      .crossVectors(rightAxis, up);
+
+  if (forward.lengthSq() < 1e-10) {
+    forward.set(0, 0, 1);
+  } else {
+    forward.normalize();
+  }
+
+  rightAxis
+    .crossVectors(up, forward)
+    .normalize();
+
+  const basisMatrix =
+    new THREE.Matrix4().makeBasis(
+      rightAxis,
+      up,
+      forward
+    );
+
+  const basis =
+    new THREE.Quaternion()
+      .setFromRotationMatrix(basisMatrix)
+      .normalize();
+
+  return {
+    basis,
+    up,
+    right: rightAxis,
+    forward,
+  };
+}
+
+function computeRigHeightFromPose(
+  pose,
+  includedNames = null,
+  worldToCanonical = null
+) {
   let minY = Infinity;
   let maxY = -Infinity;
 
   for (const [name, entry] of pose) {
-    if (includedNames && !includedNames.has(name)) continue;
+    if (
+      includedNames &&
+      !includedNames.has(name)
+    ) {
+      continue;
+    }
 
-    minY = Math.min(minY, entry.worldPosition.y);
-    maxY = Math.max(maxY, entry.worldPosition.y);
+    const p =
+      entry.worldPosition.clone();
+
+    if (worldToCanonical) {
+      p.applyQuaternion(
+        worldToCanonical
+      );
+    }
+
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
   }
 
   const height = maxY - minY;
