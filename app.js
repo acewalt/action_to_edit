@@ -17,8 +17,8 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-38';
-import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-38';
+} from './retargeting.js?v=20260918-39';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-39';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -1391,6 +1391,23 @@ function applyActionEditPipeline(clip, record, baseAsset) {
   return clip;
 }
 
+function captureRestHierarchy(object) {
+  const snapshot = [];
+
+  object.updateMatrixWorld(true);
+
+  object.traverse((node) => {
+    snapshot.push({
+      position: node.position.toArray(),
+      quaternion: node.quaternion.toArray(),
+      scale: node.scale.toArray(),
+      visible: node.visible !== false,
+    });
+  });
+
+  return snapshot;
+}
+
 function captureRestPose(object) {
   const rest = new Map();
   object.updateMatrixWorld(true);
@@ -2606,6 +2623,10 @@ async function importFiles(fileList) {
         skinnedMeshCount: countSkinnedMeshes(object),
         nodeNames: collectNodeNames(object),
         restPose: captureRestPose(object),
+        // Exact import-state snapshot by traversal index. Unlike the legacy
+        // name map this survives duplicate object/control names and lets
+        // Retarget/Rest Pose restore a clone even if the live base is animated.
+        restHierarchy: captureRestHierarchy(object),
         unitScaleFactor: Number(object.userData?.unitScaleFactor) || 1,
       });
 
