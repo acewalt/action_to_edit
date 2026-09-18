@@ -495,8 +495,17 @@ export class RestPoseEditor {
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
 
-    const sourceHeight = computeBoneHeight(this.sourceBones);
-    const targetHeight = computeBoneHeight(this.targetBones);
+    const sourceDisplayBones = chooseDisplayBoneSet(this.sourceBones);
+    const targetDisplayBones = chooseDisplayBoneSet(this.targetBones);
+
+    const sourceHeight = computeBoneHeight(
+      this.sourceBones,
+      sourceDisplayBones
+    );
+    const targetHeight = computeBoneHeight(
+      this.targetBones,
+      targetDisplayBones
+    );
 
     this.displayScaleRatio =
       this.autoScale && sourceHeight > 1e-8 && targetHeight > 1e-8
@@ -507,8 +516,17 @@ export class RestPoseEditor {
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
 
-    const sourceBox = safeBoxFromObject(this.sourceRoot);
-    const targetBox = safeBoxFromObject(this.targetRoot);
+    // Align using the actual deform/FK skeleton, not every control bone or
+    // custom-shape object exported by a control rig. This is critical for
+    // CloudRig/Sintel FBXs where helper controls can sit far away from the body.
+    const sourceBox = boxFromBones(
+      this.sourceBones,
+      sourceDisplayBones
+    );
+    const targetBox = boxFromBones(
+      this.targetBones,
+      targetDisplayBones
+    );
 
     if (!sourceBox || !targetBox) return;
 
@@ -773,7 +791,10 @@ export class RestPoseEditor {
     if (!this.sourceBones.size) return;
 
     const sourceHeight = Math.max(
-      computeBoneHeight(this.sourceBones) * this.displayScaleRatio,
+      computeBoneHeight(
+        this.sourceBones,
+        chooseDisplayBoneSet(this.sourceBones)
+      ) * this.displayScaleRatio,
       0.1
     );
 
@@ -946,10 +967,19 @@ export class RestPoseEditor {
     const box = new THREE.Box3();
     let hasBox = false;
 
-    for (const group of [this.sourceGroup, this.targetGroup]) {
-      if (!group.visible) continue;
+    const visibleBoneSets = [
+      [this.sourceVisible, this.sourceBones],
+      [this.targetVisible, this.targetBones],
+    ];
 
-      const current = safeBoxFromObject(group);
+    for (const [visible, bones] of visibleBoneSets) {
+      if (!visible || !bones?.size) continue;
+
+      const current = boxFromBones(
+        bones,
+        chooseDisplayBoneSet(bones)
+      );
+
       if (!current) continue;
 
       if (!hasBox) {
@@ -1501,7 +1531,7 @@ function applyBonePoseOverride(root, override) {
   root.updateMatrixWorld(true);
 }
 
-function computeBoneHeight(bones) {
+function computeBoneHeight(bones, selected = null) {
   if (!bones?.size) return 0;
 
   let minY = Infinity;
@@ -1509,7 +1539,9 @@ function computeBoneHeight(bones) {
 
   const point = new THREE.Vector3();
 
-  for (const bone of bones.values()) {
+  for (const [name, bone] of bones) {
+    if (selected && !selected.has(name)) continue;
+
     bone.getWorldPosition(point);
 
     minY = Math.min(minY, point.y);
@@ -1518,6 +1550,36 @@ function computeBoneHeight(bones) {
 
   const height = maxY - minY;
   return Number.isFinite(height) ? height : 0;
+}
+
+function boxFromBones(bones, selected = null) {
+  if (!bones?.size) return null;
+
+  const box = new THREE.Box3();
+  box.makeEmpty();
+
+  const point = new THREE.Vector3();
+  let count = 0;
+
+  for (const [name, bone] of bones) {
+    if (selected && !selected.has(name)) continue;
+
+    bone.getWorldPosition(point);
+    if (
+      !Number.isFinite(point.x) ||
+      !Number.isFinite(point.y) ||
+      !Number.isFinite(point.z)
+    ) {
+      continue;
+    }
+
+    box.expandByPoint(point);
+    count += 1;
+  }
+
+  return count && !box.isEmpty()
+    ? box
+    : null;
 }
 
 function cloneMaterialsForPreview(root, {
