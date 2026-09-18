@@ -47,6 +47,7 @@ const state = {
   previewClip: null,
   skeletonHelper: null,
   skeletonVisible: false,
+  previewStage: null,
   isScrubbing: false,
   exporting: false,
 };
@@ -56,6 +57,11 @@ fbxLoader.trimAnimationClips = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0e1115);
+
+const previewStage = new THREE.Group();
+previewStage.name = '__preview_stage__';
+scene.add(previewStage);
+state.previewStage = previewStage;
 
 const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 100000);
 camera.position.set(3, 2.4, 5);
@@ -194,6 +200,49 @@ function makeClipForBase(record, baseAsset, usedNames = null) {
   return clip;
 }
 
+function normalizePreview(object) {
+  previewStage.position.set(0, 0, 0);
+  previewStage.rotation.set(0, 0, 0);
+  previewStage.scale.setScalar(1);
+  previewStage.updateMatrixWorld(true);
+  object.updateMatrixWorld(true);
+
+  let box = new THREE.Box3().setFromObject(object, true);
+  const finite =
+    Number.isFinite(box.min.x) && Number.isFinite(box.min.y) && Number.isFinite(box.min.z) &&
+    Number.isFinite(box.max.x) && Number.isFinite(box.max.y) && Number.isFinite(box.max.z);
+
+  if (box.isEmpty() || !finite) {
+    setStatus('El FBX cargó, pero no se pudo calcular su volumen visual. Intentando vista de respaldo.', 'warn');
+    previewStage.position.set(0, 0, 0);
+    previewStage.scale.setScalar(1);
+    return false;
+  }
+
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+
+  if (!Number.isFinite(maxDim) || maxDim <= 1e-8) {
+    setStatus('El FBX no tiene un volumen visible utilizable para auto-encuadre.', 'warn');
+    return false;
+  }
+
+  // Normalización solo para la vista previa. NO modifica los transforms del FBX exportado.
+  const desiredSize = 3.0;
+  const scale = THREE.MathUtils.clamp(desiredSize / maxDim, 1e-6, 1e6);
+  previewStage.scale.setScalar(scale);
+  previewStage.position.set(
+    -center.x * scale,
+    -box.min.y * scale,
+    -center.z * scale
+  );
+  previewStage.updateMatrixWorld(true);
+  object.updateMatrixWorld(true);
+
+  return true;
+}
+
 function renderAssets() {
   els.assetCount.textContent = String(state.assets.length);
   els.assetList.innerHTML = '';
@@ -252,17 +301,64 @@ function renderActions() {
     node.querySelector('.action-play').addEventListener('click', () => playClip(record.id));
 
     const nameInput = node.querySelector('.action-name');
+    const renameButton = node.querySelector('.action-rename');
     nameInput.value = record.name;
-    nameInput.addEventListener('input', (event) => {
-      record.name = event.target.value;
+    nameInput.readOnly = true;
+
+    let originalEditValue = record.name;
+
+    const saveRename = () => {
+      record.name = nameInput.value.trim() || record.originalName || 'Action';
+      nameInput.value = record.name;
+      nameInput.readOnly = true;
+      node.classList.remove('editing');
+      renameButton.textContent = 'Renombrar';
       if (record.id === state.activeClipId) {
-        els.activeActionBadge.textContent = record.name || 'Action';
+        els.activeActionBadge.textContent = record.name;
+      }
+      setStatus('Action renombrada a "' + record.name + '".', 'ok');
+      updateExportState();
+    };
+
+    const cancelRename = () => {
+      nameInput.value = originalEditValue;
+      nameInput.readOnly = true;
+      node.classList.remove('editing');
+      renameButton.textContent = 'Renombrar';
+    };
+
+    renameButton.addEventListener('click', () => {
+      if (!nameInput.readOnly) {
+        saveRename();
+        return;
+      }
+
+      originalEditValue = record.name;
+      nameInput.readOnly = false;
+      node.classList.add('editing');
+      renameButton.textContent = 'Guardar';
+      nameInput.focus();
+      nameInput.select();
+    });
+
+    nameInput.addEventListener('input', (event) => {
+      if (record.id === state.activeClipId) {
+        els.activeActionBadge.textContent = event.target.value || 'Action';
       }
     });
-    nameInput.addEventListener('blur', () => {
-      record.name = record.name.trim() || record.originalName || 'Action';
-      nameInput.value = record.name;
-      updateExportState();
+
+    nameInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        saveRename();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        cancelRename();
+      }
+    });
+
+    nameInput.addEventListener('dblclick', () => {
+      if (nameInput.readOnly) renameButton.click();
     });
 
     node.querySelector('.action-origin').textContent = record.sourceFile;
@@ -326,7 +422,7 @@ function setBaseAsset(assetId) {
   if (!next) return;
 
   const oldBase = getBaseAsset();
-  if (oldBase && oldBase.object.parent === scene) scene.remove(oldBase.object);
+  if (oldBase && oldBase.object.parent === previewStage) previewStage.remove(oldBase.object);
   if (state.skeletonHelper) {
     scene.remove(state.skeletonHelper);
     state.skeletonHelper.dispose?.();
@@ -335,7 +431,8 @@ function setBaseAsset(assetId) {
 
   disposeMixer();
   state.baseAssetId = next.id;
-  scene.add(next.object);
+  previewStage.add(next.object);
+  normalizePreview(next.object);
   state.mixer = new THREE.AnimationMixer(next.object);
 
   state.skeletonHelper = new THREE.SkeletonHelper(next.object);
@@ -360,7 +457,7 @@ function removeAsset(assetId) {
   if (!asset) return;
 
   if (state.baseAssetId === assetId) {
-    if (asset.object.parent === scene) scene.remove(asset.object);
+    if (asset.object.parent === previewStage) previewStage.remove(asset.object);
     disposeMixer();
     state.baseAssetId = null;
     if (state.skeletonHelper) {
@@ -526,31 +623,40 @@ function playClip(clipId) {
 }
 
 function fitCameraToObject(object) {
-  const box = new THREE.Box3().setFromObject(object);
-  if (box.isEmpty()) {
-    camera.position.set(3, 2.4, 5);
-    controls.target.set(0, 1, 0);
+  previewStage.updateMatrixWorld(true);
+  object.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(object, true);
+  const finite =
+    Number.isFinite(box.min.x) && Number.isFinite(box.min.y) && Number.isFinite(box.min.z) &&
+    Number.isFinite(box.max.x) && Number.isFinite(box.max.y) && Number.isFinite(box.max.z);
+
+  if (box.isEmpty() || !finite) {
+    camera.position.set(4.2, 2.2, 5.2);
+    controls.target.set(0, 1.4, 0);
+    camera.near = 0.001;
+    camera.far = 1000;
+    camera.updateProjectionMatrix();
     controls.update();
     return;
   }
 
   const sphere = box.getBoundingSphere(new THREE.Sphere());
-  const radius = Math.max(sphere.radius, 0.01);
+  const radius = Math.max(sphere.radius, 0.1);
   const fov = THREE.MathUtils.degToRad(camera.fov);
-  const distance = radius / Math.sin(fov / 2) * 1.25;
+  const distance = Math.max(radius / Math.sin(fov / 2) * 1.18, 2.5);
 
-  const direction = new THREE.Vector3(1, 0.6, 1).normalize();
+  const direction = new THREE.Vector3(0.9, 0.35, 1).normalize();
   camera.position.copy(sphere.center).addScaledVector(direction, distance);
-  camera.near = Math.max(distance / 1000, 0.001);
-  camera.far = Math.max(distance * 100, 100);
+  camera.near = Math.max(distance / 5000, 0.001);
+  camera.far = Math.max(distance * 100, 1000);
   camera.updateProjectionMatrix();
 
   controls.target.copy(sphere.center);
   controls.update();
 
-  grid.position.y = box.min.y;
-  const gridScale = Math.max(radius / 5, 0.05);
-  grid.scale.setScalar(gridScale);
+  grid.position.y = 0;
+  grid.scale.setScalar(1);
 }
 
 function restoreBasePose() {
@@ -656,7 +762,7 @@ async function exportGLB() {
 
 function clearAll() {
   const base = getBaseAsset();
-  if (base && base.object.parent === scene) scene.remove(base.object);
+  if (base && base.object.parent === previewStage) previewStage.remove(base.object);
   disposeMixer();
   if (state.skeletonHelper) {
     scene.remove(state.skeletonHelper);
@@ -691,7 +797,11 @@ els.clearAllBtn.addEventListener('click', clearAll);
 els.actionSearch.addEventListener('input', renderActions);
 els.fitCameraBtn.addEventListener('click', () => {
   const base = getBaseAsset();
-  if (base) fitCameraToObject(base.object);
+  if (base) {
+    normalizePreview(base.object);
+    fitCameraToObject(base.object);
+    setStatus('Vista previa reencuadrada.', 'ok');
+  }
 });
 els.toggleSkeletonBtn.addEventListener('click', () => {
   state.skeletonVisible = !state.skeletonVisible;
