@@ -33,3 +33,35 @@ El proyecto está preparado para publicarse directamente desde **main / root**. 
 ## Consideraciones
 
 El flujo está pensado para animaciones creadas sobre el mismo rig. La compatibilidad depende principalmente de que coincidan los nombres de huesos/nodos utilizados por los tracks. Los FBX que dependan de texturas externas no seleccionadas pueden mostrarse sin esas texturas; las texturas embebidas son el caso más seguro.
+
+
+## Retargeting web
+
+La herramienta incluye una ventana **Retargeting** para transferir una Action entre dos rigs FBX importados directamente en el navegador.
+
+Funciones actuales:
+
+- Source Rig, Target Rig y Source Action.
+- Bone Map editable con Source/Target, Rotation, Location, Location & Rotation, ejes, Anchor e Influence.
+- Auto-Match por nombres y convenciones comunes.
+- Source Prefix / Target Prefix con detección automática.
+- Auto-scale por altura de rig.
+- Lectura opcional de Location en world space.
+- Rest pose original o primer frame como override.
+- Bake web a quaternion con transferencia **world-space delta-from-rest**.
+- Continuidad de signo quaternion para evitar interpolaciones largas.
+- Head-local/Anchor para pares de Location.
+- Guardar presets personalizados en el navegador e importar/exportar JSON.
+- Lectura de los presets estándar públicos de BlendCap para Rigify, Auto-Rig Pro, CloudRig, Mixamo y Mixamo Control Rig.
+
+### BlendCap y límites de la versión web
+
+La interfaz y el formato de presets son compatibles/adaptados a partir del flujo público de **BlendCap** de Arcomade:
+
+https://github.com/Arcomade/BlendCap
+
+Los presets BlendCap se leen en tiempo de ejecución desde su repositorio público y están publicados bajo **GPL-3.0-or-later**. El motor de retargeting de esta página está implementado independientemente sobre Three.js.
+
+Un navegador que procesa FBX no tiene el runtime de Blender. Por eso no puede reproducir de forma idéntica las partes que dependen de bpy, depsgraph, drivers, constraints o propiedades particulares de control rigs. En concreto, el bake web actual genera animación FK sobre huesos del FBX; conserva el **FK → IK Mapping** en los presets, pero no ejecuta todavía el mismo Convert FK → IK de Rigify / Auto-Rig Pro / CloudRig que BlendCap ejecuta dentro de Blender.
+
+Para skeleton-to-skeleton FBX, Mixamo y rigs con huesos animables directamente, el retarget se realiza completamente en el navegador.
