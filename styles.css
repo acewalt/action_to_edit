@@ -461,6 +461,16 @@ button { color: inherit; }
   background: var(--line);
 }
 .root-offset-section { min-width: 0; }
+.action-transform-note {
+  margin: -1px 0 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255,255,255,.025);
+  color: var(--muted);
+  font-size: 8.5px;
+  line-height: 1.4;
+}
 .motion-select {
   width: 100%;
   min-width: 0;
