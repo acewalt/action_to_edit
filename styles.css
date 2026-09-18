@@ -461,6 +461,31 @@ button { color: inherit; }
   background: var(--line);
 }
 .root-offset-section { min-width: 0; }
+.limb-offset-section {
+  min-width: 0;
+}
+.limb-field {
+  display: block;
+  margin-bottom: 7px;
+}
+.limb-field > span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 8.5px;
+}
+.limb-stretch-check {
+  margin-top: 7px;
+  margin-bottom: 3px;
+}
+.limb-hint {
+  display: block;
+  margin: 0 0 8px;
+  color: #717b87;
+  font-size: 8px;
+  line-height: 1.35;
+}
+
 .action-transform-note {
   margin: -1px 0 8px;
   padding: 7px 8px;
