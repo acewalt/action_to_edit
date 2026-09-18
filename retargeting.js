@@ -149,6 +149,33 @@ export function resolveBoneName(shortName, boneNames, prefix = '') {
     if (prefixedInsensitive) return prefixedInsensitive;
   }
 
+  // Browser adaptation: Blender presets often point at FK/control bones.
+  // FBX exports may rename or omit those controls while keeping an equivalent
+  // deform bone. Fall back to a semantic body-role match.
+  const wanted = semanticBoneKey(shortName);
+  if (wanted) {
+    const candidates = [...set].filter((name) =>
+      semanticBoneKey(stripPrefix(name, prefix)) === wanted ||
+      semanticBoneKey(name) === wanted
+    );
+
+    if (candidates.length) {
+      candidates.sort((a, b) => {
+        const score = (name) => {
+          const n = String(name).toLowerCase();
+          let value = 0;
+          if (/^def[-_:]/.test(n)) value += 30;
+          if (/deform/.test(n)) value += 20;
+          if (/mch|org|ctrl|control|pole|target|ik[_\-.]/.test(n)) value -= 25;
+          if (/twist|tweak|roll/.test(n)) value -= 15;
+          return value;
+        };
+        return score(b) - score(a) || String(a).localeCompare(String(b));
+      });
+      return candidates[0];
+    }
+  }
+
   return '';
 }
 
@@ -305,8 +332,9 @@ export async function buildRetargetClip({
   const sourceRoot = SkeletonUtils.clone(sourceAsset.object);
   const targetRoot = SkeletonUtils.clone(targetAsset.object);
 
-  // Mirror Action to Edit's preview hierarchy so per-Action whole-rig
-  // transforms are sampled by the retargeter too.
+  // Mirror Action to Edit's preview hierarchy so identity Action Transform
+  // tracks bind cleanly. Non-identity whole-rig offsets are intentionally
+  // carried separately by app.js and are NOT injected into every bone.
   const sourceContainer = new THREE.Group();
   sourceContainer.name = '__RetargetSourceContainer__';
   const sourceActionTransform = new THREE.Group();
@@ -864,16 +892,16 @@ function semanticBoneKey(name) {
 
   if (/shoulder|clavicle/.test(raw)) return side + 'shoulder';
   if (/forearm|lowerarm|elbow/.test(raw)) return side + 'forearm';
-  if (/upperarm/.test(raw) || raw === 'arm') return side + 'upperarm';
+  if (/upperarm/.test(raw) || raw === 'arm' || /armfk/.test(raw)) return side + 'upperarm';
   if (/hand|wrist/.test(raw)) return side + 'hand';
 
   if (/upperleg|upleg|thigh/.test(raw)) return side + 'thigh';
-  if (/lowerleg|calf|shin/.test(raw) || raw === 'leg') return side + 'shin';
+  if (/lowerleg|calf|shin|knee/.test(raw) || raw === 'leg' || /legfk/.test(raw)) return side + 'shin';
   if (/toe/.test(raw)) return side + 'toe';
   if (/foot|ankle/.test(raw)) return side + 'foot';
 
   if (/hips|pelvis/.test(raw)) return 'hips';
-  if (/root|master/.test(raw)) return 'root';
+  if (/root|master/.test(raw) || /^c?pos$/.test(raw)) return 'root';
   if (/head/.test(raw)) return 'head';
   if (/neck/.test(raw)) return 'neck';
 
