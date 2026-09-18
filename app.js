@@ -297,8 +297,12 @@ function renderActions() {
     const node = els.actionTemplate.content.firstElementChild.cloneNode(true);
     node.dataset.clipId = record.id;
     node.classList.toggle('active', record.id === state.activeClipId);
+    node.classList.toggle('empty-action', Boolean(record.empty));
 
-    node.querySelector('.action-play').addEventListener('click', () => playClip(record.id));
+    const playButton = node.querySelector('.action-play');
+    playButton.disabled = Boolean(record.empty);
+    playButton.title = record.empty ? 'Esta action no contiene tracks' : 'Reproducir';
+    playButton.addEventListener('click', () => playClip(record.id));
 
     const nameInput = node.querySelector('.action-name');
     const renameButton = node.querySelector('.action-rename');
@@ -524,6 +528,9 @@ async function importFiles(fileList) {
       rawClips.forEach((clip, clipIndex) => {
         const cloned = clip.clone();
         const originalName = (cloned.name || '').trim() || stripExt(file.name) + '_Action_' + (clipIndex + 1);
+        const isEmpty = cloned.tracks.length === 0 || cloned.duration <= 1e-6;
+        const genericName = /^(mixamo\.com|take\s*\d+|animationstack::mixamo\.com)$/i.test(originalName);
+        const displayName = !isEmpty && genericName ? stripExt(file.name) : originalName;
         cloned.name = originalName;
 
         const record = {
@@ -532,9 +539,10 @@ async function importFiles(fileList) {
           sourceFile: file.name,
           sourceRootName: object.name || '',
           originalName,
-          name: originalName,
+          name: displayName,
           clip: cloned,
-          include: true,
+          empty: isEmpty,
+          include: !isEmpty,
         };
         state.clips.push(record);
         assetClips.push(record.id);
@@ -570,10 +578,11 @@ async function importFiles(fileList) {
   }
 
   const actionTotal = state.clips.length;
+  const usefulTotal = state.clips.filter((record) => !record.empty).length;
   if (imported) {
     setStatus(
-      'Importados ' + imported + ' FBX y recuperadas ' + actionTotal + ' action' + (actionTotal === 1 ? '' : 's') +
-      (failed ? '. ' + failed + ' archivo(s) fallaron.' : '.'),
+      'Importados ' + imported + ' FBX · ' + actionTotal + ' actions detectadas · ' + usefulTotal + ' útiles para reproducir/exportar' +
+      (failed ? ' · ' + failed + ' archivo(s) fallaron.' : '.'),
       failed ? 'warn' : 'ok'
     );
   }
@@ -584,6 +593,11 @@ function playClip(clipId) {
   const record = state.clips.find((item) => item.id === clipId);
   if (!base || !record || !state.mixer) {
     setStatus('Elige un modelo base antes de reproducir una action.', 'warn');
+    return;
+  }
+
+  if (record.empty || record.clip.tracks.length === 0 || record.clip.duration <= 1e-6) {
+    setStatus('"' + record.name + '" está vacía: no contiene tracks de animación reproducibles.', 'warn');
     return;
   }
 
@@ -632,8 +646,8 @@ function fitCameraToObject(object) {
     Number.isFinite(box.max.x) && Number.isFinite(box.max.y) && Number.isFinite(box.max.z);
 
   if (box.isEmpty() || !finite) {
-    camera.position.set(4.2, 2.2, 5.2);
-    controls.target.set(0, 1.4, 0);
+    camera.position.set(0, 1.5, 5);
+    controls.target.set(0, 1.5, 0);
     camera.near = 0.001;
     camera.far = 1000;
     camera.updateProjectionMatrix();
@@ -641,18 +655,28 @@ function fitCameraToObject(object) {
     return;
   }
 
-  const sphere = box.getBoundingSphere(new THREE.Sphere());
-  const radius = Math.max(sphere.radius, 0.1);
-  const fov = THREE.MathUtils.degToRad(camera.fov);
-  const distance = Math.max(radius / Math.sin(fov / 2) * 1.18, 2.5);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
 
-  const direction = new THREE.Vector3(0.9, 0.35, 1).normalize();
-  camera.position.copy(sphere.center).addScaledVector(direction, distance);
-  camera.near = Math.max(distance / 5000, 0.001);
+  const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+  const aspect = Math.max(camera.aspect || 1, 0.05);
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
+
+  const fitHeight = size.y / (2 * Math.tan(verticalFov / 2));
+  const fitWidth = size.x / (2 * Math.tan(horizontalFov / 2));
+  const fitDepth = size.z * 0.65;
+  const distance = Math.max(fitHeight, fitWidth, 1.5) * 1.28 + fitDepth;
+
+  // Vista ligeramente en perspectiva, manteniendo el personaje completo dentro del frame.
+  const direction = new THREE.Vector3(0.32, 0.12, 1).normalize();
+  camera.position.copy(center).addScaledVector(direction, distance);
+  camera.near = Math.max(distance / 1000, 0.001);
   camera.far = Math.max(distance * 100, 1000);
   camera.updateProjectionMatrix();
 
-  controls.target.copy(sphere.center);
+  controls.target.copy(center);
+  controls.minDistance = Math.max(distance * 0.08, 0.05);
+  controls.maxDistance = distance * 12;
   controls.update();
 
   grid.position.y = 0;
@@ -827,12 +851,22 @@ els.timeline.addEventListener('input', () => {
 els.exportFbxBtn.addEventListener('click', exportFBX);
 els.exportGlbBtn.addEventListener('click', exportGLB);
 
+let lastViewportAspect = 0;
+
 function resize() {
   const width = Math.max(1, els.viewport.clientWidth);
   const height = Math.max(1, els.viewport.clientHeight);
+  const nextAspect = width / height;
+
   renderer.setSize(width, height, false);
-  camera.aspect = width / height;
+  camera.aspect = nextAspect;
   camera.updateProjectionMatrix();
+
+  const base = getBaseAsset();
+  if (base && Math.abs(nextAspect - lastViewportAspect) > 0.08) {
+    requestAnimationFrame(() => fitCameraToObject(base.object));
+  }
+  lastViewportAspect = nextAspect;
 }
 new ResizeObserver(resize).observe(els.viewport);
 resize();
