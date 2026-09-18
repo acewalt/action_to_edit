@@ -841,3 +841,13 @@ button { color: inherit; }
   .action-rename { grid-column: 2; justify-self: start; }
   .include-toggle { grid-column: 3; grid-row: 1 / span 2; }
 }
+
+.limb-gizmo-button {
+  min-height: 30px;
+  font-weight: 650;
+  border-width: 1px;
+}
+.limb-gizmo-button:not(.active) {
+  border-color: #3b5267;
+  background: rgba(63, 124, 255, .07);
+}
