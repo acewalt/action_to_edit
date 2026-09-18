@@ -251,64 +251,26 @@ function mirrorAnimationClip(clip) {
   }
 }
 
-function scaleQuaternionDelta(qRest, qAnimated, factor, out) {
-  const invRest = qRest.clone().invert();
-  const delta = invRest.multiply(qAnimated).normalize();
-
-  let w = THREE.MathUtils.clamp(delta.w, -1, 1);
-  let angle = 2 * Math.acos(w);
-  if (angle > Math.PI) angle -= Math.PI * 2;
-
-  const s = Math.sqrt(Math.max(1 - w * w, 0));
-  const axis = s < 1e-6
-    ? new THREE.Vector3(1, 0, 0)
-    : new THREE.Vector3(delta.x / s, delta.y / s, delta.z / s);
-
-  const scaled = new THREE.Quaternion().setFromAxisAngle(axis, angle * factor);
-  return out.copy(qRest).multiply(scaled).normalize();
+function getOverdriveSpeed(value) {
+  const v = THREE.MathUtils.clamp(Number(value) || 50, 0, 100);
+  // 0 = 0.5x · 50 = 1x · 100 = 2x
+  return Math.pow(2, (v - 50) / 50);
 }
 
-function applyOverdrive(clip, baseAsset, value) {
-  const factor = Number(value) / 50;
-  if (!Number.isFinite(factor) || Math.abs(factor - 1) < 1e-6) return;
+function applyOverdrive(clip, value) {
+  const speed = getOverdriveSpeed(value);
+  if (!Number.isFinite(speed) || Math.abs(speed - 1) < 1e-6) return;
 
-  const qAnim = new THREE.Quaternion();
-  const qOut = new THREE.Quaternion();
-
+  // Overdrive is TEMPORAL ONLY: it never changes pose amplitude,
+  // positions, rotations or scale values. It only compresses/expands
+  // keyframe time, so the exported Action really plays faster/slower.
   for (const track of clip.tracks) {
-    let parsed;
-    try {
-      parsed = THREE.PropertyBinding.parseTrackName(track.name);
-    } catch {
-      continue;
-    }
-
-    const rest = baseAsset?.restPose?.get(parsed.nodeName);
-    if (!rest) continue;
-
-    if (parsed.propertyName === 'position') {
-      for (let i = 0; i < track.values.length; i += 3) {
-        track.values[i] = rest.position.x + (track.values[i] - rest.position.x) * factor;
-        track.values[i + 1] = rest.position.y + (track.values[i + 1] - rest.position.y) * factor;
-        track.values[i + 2] = rest.position.z + (track.values[i + 2] - rest.position.z) * factor;
-      }
-    } else if (parsed.propertyName === 'scale') {
-      for (let i = 0; i < track.values.length; i += 3) {
-        track.values[i] = rest.scale.x + (track.values[i] - rest.scale.x) * factor;
-        track.values[i + 1] = rest.scale.y + (track.values[i + 1] - rest.scale.y) * factor;
-        track.values[i + 2] = rest.scale.z + (track.values[i + 2] - rest.scale.z) * factor;
-      }
-    } else if (parsed.propertyName === 'quaternion') {
-      for (let i = 0; i < track.values.length; i += 4) {
-        qAnim.set(track.values[i], track.values[i + 1], track.values[i + 2], track.values[i + 3]).normalize();
-        scaleQuaternionDelta(rest.quaternion, qAnim, factor, qOut);
-        track.values[i] = qOut.x;
-        track.values[i + 1] = qOut.y;
-        track.values[i + 2] = qOut.z;
-        track.values[i + 3] = qOut.w;
-      }
+    for (let i = 0; i < track.times.length; i++) {
+      track.times[i] /= speed;
     }
   }
+
+  if (clip.duration > 0) clip.duration /= speed;
 }
 
 function applyArmSpace(clip, value) {
@@ -448,7 +410,7 @@ function applyActionEditPipeline(clip, record, baseAsset) {
   const edit = ensureActionEdit(record);
 
   if (edit.mirror) mirrorAnimationClip(clip);
-  applyOverdrive(clip, baseAsset, edit.overdrive);
+  applyOverdrive(clip, edit.overdrive);
   applyArmSpace(clip, edit.armSpace);
   applyRootOffset(clip, record, baseAsset);
   trimClipByPercent(clip, edit.trimStart, edit.trimEnd);
@@ -909,7 +871,8 @@ function renderMotionPanel() {
   els.motionPanelActionName.textContent = record.name;
 
   els.overdriveRange.value = String(edit.overdrive);
-  els.overdriveValue.textContent = String(edit.overdrive);
+  els.overdriveValue.textContent =
+    String(edit.overdrive) + ' · ' + getOverdriveSpeed(edit.overdrive).toFixed(2) + '×';
   els.armSpaceRange.value = String(edit.armSpace);
   els.armSpaceValue.textContent = String(edit.armSpace);
 
@@ -1732,7 +1695,8 @@ els.overdriveRange.addEventListener('input', () => {
   if (!record) return;
   const edit = ensureActionEdit(record);
   edit.overdrive = Number(els.overdriveRange.value);
-  els.overdriveValue.textContent = String(edit.overdrive);
+  els.overdriveValue.textContent =
+    String(edit.overdrive) + ' · ' + getOverdriveSpeed(edit.overdrive).toFixed(2) + '×';
   refreshActivePreview();
 });
 
