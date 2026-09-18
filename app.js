@@ -17,7 +17,7 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-31';
+} from './retargeting.js?v=20260918-33';
 import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-31';
 
 const $ = (selector) => document.querySelector(selector);
