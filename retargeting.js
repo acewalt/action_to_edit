@@ -864,11 +864,11 @@ function semanticBoneKey(name) {
 
   if (/shoulder|clavicle/.test(raw)) return side + 'shoulder';
   if (/forearm|lowerarm|elbow/.test(raw)) return side + 'forearm';
-  if (/upperarm/.test(raw)) return side + 'upperarm';
+  if (/upperarm/.test(raw) || raw === 'arm') return side + 'upperarm';
   if (/hand|wrist/.test(raw)) return side + 'hand';
 
   if (/upperleg|upleg|thigh/.test(raw)) return side + 'thigh';
-  if (/lowerleg|calf|shin/.test(raw)) return side + 'shin';
+  if (/lowerleg|calf|shin/.test(raw) || raw === 'leg') return side + 'shin';
   if (/toe/.test(raw)) return side + 'toe';
   if (/foot|ankle/.test(raw)) return side + 'foot';
 
