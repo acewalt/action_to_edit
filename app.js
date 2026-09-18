@@ -1,0 +1,750 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { FBXExporter } from '@comfyorg/fbx-exporter-three';
+
+const $ = (selector) => document.querySelector(selector);
+
+const els = {
+  fileInput: $('#fileInput'),
+  dropZone: $('#dropZone'),
+  clearAllBtn: $('#clearAllBtn'),
+  assetList: $('#assetList'),
+  assetCount: $('#assetCount'),
+  actionList: $('#actionList'),
+  actionCount: $('#actionCount'),
+  actionSearch: $('#actionSearch'),
+  viewport: $('#viewport'),
+  viewportEmpty: $('#viewportEmpty'),
+  baseBadge: $('#baseBadge'),
+  activeActionBadge: $('#activeActionBadge'),
+  playPauseBtn: $('#playPauseBtn'),
+  timeline: $('#timeline'),
+  currentTime: $('#currentTime'),
+  durationTime: $('#durationTime'),
+  speedSelect: $('#speedSelect'),
+  toggleSkeletonBtn: $('#toggleSkeletonBtn'),
+  fitCameraBtn: $('#fitCameraBtn'),
+  statusBar: $('#statusBar'),
+  statusText: $('#statusText'),
+  presetSelect: $('#presetSelect'),
+  exportModelName: $('#exportModelName'),
+  exportActionCount: $('#exportActionCount'),
+  exportFbxBtn: $('#exportFbxBtn'),
+  exportGlbBtn: $('#exportGlbBtn'),
+  assetTemplate: $('#assetTemplate'),
+  actionTemplate: $('#actionTemplate'),
+};
+
+const state = {
+  assets: [],
+  clips: [],
+  baseAssetId: null,
+  activeClipId: null,
+  mixer: null,
+  currentAction: null,
+  previewClip: null,
+  skeletonHelper: null,
+  skeletonVisible: false,
+  isScrubbing: false,
+  exporting: false,
+};
+
+const fbxLoader = new FBXLoader();
+fbxLoader.trimAnimationClips = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1115);
+
+const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 100000);
+camera.position.set(3, 2.4, 5);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+els.viewport.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 1, 0);
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x20252b, 2.0);
+scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, 3.0);
+key.position.set(4, 7, 5);
+key.castShadow = true;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x9fb8ff, 1.2);
+rim.position.set(-4, 3, -5);
+scene.add(rim);
+
+const grid = new THREE.GridHelper(20, 20, 0x39414c, 0x222830);
+grid.position.y = 0;
+scene.add(grid);
+
+const clock = new THREE.Clock();
+
+function uid(prefix = 'id') {
+  return crypto.randomUUID ? crypto.randomUUID() : prefix + '_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+}
+
+function stripExt(name) {
+  return name.replace(/\.fbx$/i, '');
+}
+
+function formatDuration(seconds) {
+  return Number.isFinite(seconds) ? seconds.toFixed(2) + ' s' : '0.00 s';
+}
+
+function setStatus(message, kind = 'info') {
+  els.statusText.textContent = message;
+  els.statusBar.dataset.kind = kind;
+}
+
+function getBaseAsset() {
+  return state.assets.find((asset) => asset.id === state.baseAssetId) || null;
+}
+
+function getIncludedClips() {
+  return state.clips.filter((record) => record.include);
+}
+
+function countBones(object) {
+  let n = 0;
+  object.traverse((node) => { if (node.isBone) n += 1; });
+  return n;
+}
+
+function countSkinnedMeshes(object) {
+  let n = 0;
+  object.traverse((node) => { if (node.isSkinnedMesh) n += 1; });
+  return n;
+}
+
+function collectNodeNames(object) {
+  const names = new Set();
+  object.traverse((node) => {
+    if (node.name) names.add(node.name);
+  });
+  if (object.name) names.add(object.name);
+  return names;
+}
+
+function getTrackNodeName(trackName) {
+  try {
+    return THREE.PropertyBinding.parseTrackName(trackName).nodeName || '';
+  } catch {
+    const dot = trackName.indexOf('.');
+    return dot >= 0 ? trackName.slice(0, dot) : trackName;
+  }
+}
+
+function compatibility(record, baseAsset) {
+  if (!baseAsset) return { ratio: 0, matched: 0, total: 0, label: 'Sin base', className: 'warn' };
+  const names = baseAsset.nodeNames;
+  const sourceRoot = record.sourceRootName;
+  let matched = 0;
+  let total = 0;
+
+  for (const track of record.clip.tracks) {
+    const target = getTrackNodeName(track.name);
+    if (!target) continue;
+    total += 1;
+    if (names.has(target) || (sourceRoot && target === sourceRoot && baseAsset.object.name)) matched += 1;
+  }
+
+  if (!total) return { ratio: 1, matched: 0, total: 0, label: 'Sin tracks', className: 'warn' };
+  const ratio = matched / total;
+  const pct = Math.round(ratio * 100);
+  return {
+    ratio,
+    matched,
+    total,
+    label: pct + '% compatible',
+    className: ratio >= 0.98 ? 'good' : ratio >= 0.7 ? 'warn' : 'bad',
+  };
+}
+
+function makeClipForBase(record, baseAsset, usedNames = null) {
+  const clip = record.clip.clone();
+  let exportName = (record.name || record.originalName || 'Action').trim() || 'Action';
+
+  if (usedNames) {
+    const rootName = exportName;
+    let i = 2;
+    while (usedNames.has(exportName.toLowerCase())) exportName = rootName + '_' + i++;
+    usedNames.add(exportName.toLowerCase());
+  }
+
+  clip.name = exportName;
+
+  if (record.sourceRootName && baseAsset.object.name && record.sourceRootName !== baseAsset.object.name) {
+    for (const track of clip.tracks) {
+      const target = getTrackNodeName(track.name);
+      if (target === record.sourceRootName) {
+        const suffix = track.name.slice(record.sourceRootName.length);
+        track.name = baseAsset.object.name + suffix;
+      }
+    }
+  }
+  return clip;
+}
+
+function renderAssets() {
+  els.assetCount.textContent = String(state.assets.length);
+  els.assetList.innerHTML = '';
+  els.assetList.classList.toggle('empty-list', state.assets.length === 0);
+
+  if (!state.assets.length) {
+    els.assetList.innerHTML = '<p>Importa FBX para elegir cuál conservará la malla y el esqueleto.</p>';
+    return;
+  }
+
+  for (const asset of state.assets) {
+    const node = els.assetTemplate.content.firstElementChild.cloneNode(true);
+    node.dataset.assetId = asset.id;
+    node.classList.toggle('active', asset.id === state.baseAssetId);
+
+    const radio = node.querySelector('.base-radio');
+    radio.value = asset.id;
+    radio.checked = asset.id === state.baseAssetId;
+    radio.addEventListener('change', () => setBaseAsset(asset.id));
+
+    node.querySelector('.asset-name').textContent = asset.file.name;
+    node.querySelector('.asset-meta').textContent =
+      asset.clips.length + ' action' + (asset.clips.length === 1 ? '' : 's') +
+      ' · ' + asset.boneCount + ' huesos · ' + asset.skinnedMeshCount + ' skin';
+
+    node.querySelector('.asset-remove').addEventListener('click', () => removeAsset(asset.id));
+    els.assetList.appendChild(node);
+  }
+}
+
+function renderActions() {
+  const query = els.actionSearch.value.trim().toLowerCase();
+  const base = getBaseAsset();
+  const visible = state.clips.filter((record) => {
+    if (!query) return true;
+    return record.name.toLowerCase().includes(query) || record.sourceFile.toLowerCase().includes(query);
+  });
+
+  els.actionCount.textContent = String(state.clips.length);
+  els.actionList.innerHTML = '';
+  els.actionList.classList.toggle('empty-list', visible.length === 0);
+
+  if (!visible.length) {
+    els.actionList.innerHTML = state.clips.length
+      ? '<p>No hay actions que coincidan con la búsqueda.</p>'
+      : '<p>Las animaciones encontradas aparecerán aquí. Puedes cambiarles el nombre y reproducirlas sobre el modelo base.</p>';
+    updateExportState();
+    return;
+  }
+
+  for (const record of visible) {
+    const node = els.actionTemplate.content.firstElementChild.cloneNode(true);
+    node.dataset.clipId = record.id;
+    node.classList.toggle('active', record.id === state.activeClipId);
+
+    node.querySelector('.action-play').addEventListener('click', () => playClip(record.id));
+
+    const nameInput = node.querySelector('.action-name');
+    nameInput.value = record.name;
+    nameInput.addEventListener('input', (event) => {
+      record.name = event.target.value;
+      if (record.id === state.activeClipId) {
+        els.activeActionBadge.textContent = record.name || 'Action';
+      }
+    });
+    nameInput.addEventListener('blur', () => {
+      record.name = record.name.trim() || record.originalName || 'Action';
+      nameInput.value = record.name;
+      updateExportState();
+    });
+
+    node.querySelector('.action-origin').textContent = record.sourceFile;
+    const include = node.querySelector('.action-include');
+    include.checked = record.include;
+    include.addEventListener('change', () => {
+      record.include = include.checked;
+      updateExportState();
+    });
+
+    node.querySelector('.duration-chip').textContent = formatDuration(record.clip.duration);
+    node.querySelector('.tracks-chip').textContent = record.clip.tracks.length + ' tracks';
+
+    const compat = compatibility(record, base);
+    const compatEl = node.querySelector('.compat-chip');
+    compatEl.textContent = compat.label;
+    compatEl.classList.add(compat.className);
+
+    els.actionList.appendChild(node);
+  }
+  updateExportState();
+}
+
+function updateExportState() {
+  const base = getBaseAsset();
+  const included = getIncludedClips();
+  const canExport = Boolean(base && included.length && !state.exporting);
+  els.exportModelName.textContent = base ? base.file.name : '—';
+  els.exportActionCount.textContent = String(included.length);
+  els.exportFbxBtn.disabled = !canExport;
+  els.exportGlbBtn.disabled = !canExport;
+}
+
+function resetPlaybackUi() {
+  state.activeClipId = null;
+  state.currentAction = null;
+  state.previewClip = null;
+  els.activeActionBadge.textContent = 'Sin acción';
+  els.playPauseBtn.textContent = '▶';
+  els.playPauseBtn.disabled = true;
+  els.timeline.disabled = true;
+  els.timeline.value = '0';
+  els.timeline.max = '1';
+  els.currentTime.textContent = '0.00 s';
+  els.durationTime.textContent = '0.00 s';
+}
+
+function disposeMixer() {
+  if (state.mixer) {
+    state.mixer.stopAllAction();
+    const base = getBaseAsset();
+    if (base) state.mixer.uncacheRoot(base.object);
+  }
+  state.mixer = null;
+  state.currentAction = null;
+  state.previewClip = null;
+}
+
+function setBaseAsset(assetId) {
+  const next = state.assets.find((asset) => asset.id === assetId);
+  if (!next) return;
+
+  const oldBase = getBaseAsset();
+  if (oldBase && oldBase.object.parent === scene) scene.remove(oldBase.object);
+  if (state.skeletonHelper) {
+    scene.remove(state.skeletonHelper);
+    state.skeletonHelper.dispose?.();
+    state.skeletonHelper = null;
+  }
+
+  disposeMixer();
+  state.baseAssetId = next.id;
+  scene.add(next.object);
+  state.mixer = new THREE.AnimationMixer(next.object);
+
+  state.skeletonHelper = new THREE.SkeletonHelper(next.object);
+  state.skeletonHelper.visible = state.skeletonVisible;
+  scene.add(state.skeletonHelper);
+
+  els.viewportEmpty.classList.add('hidden');
+  els.baseBadge.textContent = next.file.name;
+  els.toggleSkeletonBtn.disabled = false;
+  els.fitCameraBtn.disabled = false;
+  resetPlaybackUi();
+  fitCameraToObject(next.object);
+  renderAssets();
+  renderActions();
+
+  const actionTotal = state.clips.length;
+  setStatus('Modelo base: ' + next.file.name + '. Hay ' + actionTotal + ' action' + (actionTotal === 1 ? '' : 's') + ' disponibles.', 'ok');
+}
+
+function removeAsset(assetId) {
+  const asset = state.assets.find((item) => item.id === assetId);
+  if (!asset) return;
+
+  if (state.baseAssetId === assetId) {
+    if (asset.object.parent === scene) scene.remove(asset.object);
+    disposeMixer();
+    state.baseAssetId = null;
+    if (state.skeletonHelper) {
+      scene.remove(state.skeletonHelper);
+      state.skeletonHelper.dispose?.();
+      state.skeletonHelper = null;
+    }
+    resetPlaybackUi();
+  }
+
+  state.assets = state.assets.filter((item) => item.id !== assetId);
+  state.clips = state.clips.filter((record) => record.sourceId !== assetId);
+
+  if (!state.baseAssetId && state.assets.length) setBaseAsset(state.assets[0].id);
+  else {
+    renderAssets();
+    renderActions();
+    updateViewportEmpty();
+  }
+
+  setStatus('Se quitó ' + asset.file.name + '.', 'info');
+}
+
+function updateViewportEmpty() {
+  const base = getBaseAsset();
+  els.viewportEmpty.classList.toggle('hidden', Boolean(base));
+  els.baseBadge.textContent = base ? base.file.name : 'Sin modelo base';
+  els.toggleSkeletonBtn.disabled = !base;
+  els.fitCameraBtn.disabled = !base;
+  updateExportState();
+}
+
+async function importFiles(fileList) {
+  const files = Array.from(fileList).filter((file) => /\.fbx$/i.test(file.name));
+  if (!files.length) {
+    setStatus('Selecciona uno o más archivos .fbx.', 'warn');
+    return;
+  }
+
+  els.fileInput.disabled = true;
+  setStatus('Leyendo ' + files.length + ' FBX...', 'info');
+  let imported = 0;
+  let failed = 0;
+
+  for (let index = 0; index < files.length; index++) {
+    const file = files[index];
+    try {
+      setStatus('Procesando ' + (index + 1) + '/' + files.length + ': ' + file.name, 'info');
+      const buffer = await file.arrayBuffer();
+      const object = fbxLoader.parse(buffer, '');
+      if (!object.name) object.name = stripExt(file.name);
+
+      object.traverse((node) => {
+        if (node.isMesh) {
+          node.castShadow = true;
+          node.receiveShadow = true;
+        }
+      });
+
+      const rawClips = Array.isArray(object.animations) ? object.animations : [];
+      const assetId = uid('asset');
+      const assetClips = [];
+
+      rawClips.forEach((clip, clipIndex) => {
+        const cloned = clip.clone();
+        const originalName = (cloned.name || '').trim() || stripExt(file.name) + '_Action_' + (clipIndex + 1);
+        cloned.name = originalName;
+
+        const record = {
+          id: uid('clip'),
+          sourceId: assetId,
+          sourceFile: file.name,
+          sourceRootName: object.name || '',
+          originalName,
+          name: originalName,
+          clip: cloned,
+          include: true,
+        };
+        state.clips.push(record);
+        assetClips.push(record.id);
+      });
+
+      state.assets.push({
+        id: assetId,
+        file,
+        object,
+        clips: assetClips,
+        boneCount: countBones(object),
+        skinnedMeshCount: countSkinnedMeshes(object),
+        nodeNames: collectNodeNames(object),
+      });
+
+      imported += 1;
+    } catch (error) {
+      failed += 1;
+      console.error('Error importando FBX', file.name, error);
+      setStatus('No se pudo leer ' + file.name + ': ' + (error?.message || error), 'error');
+    }
+  }
+
+  els.fileInput.disabled = false;
+  els.fileInput.value = '';
+
+  if (!state.baseAssetId && state.assets.length) {
+    setBaseAsset(state.assets[0].id);
+  } else {
+    renderAssets();
+    renderActions();
+    updateViewportEmpty();
+  }
+
+  const actionTotal = state.clips.length;
+  if (imported) {
+    setStatus(
+      'Importados ' + imported + ' FBX y recuperadas ' + actionTotal + ' action' + (actionTotal === 1 ? '' : 's') +
+      (failed ? '. ' + failed + ' archivo(s) fallaron.' : '.'),
+      failed ? 'warn' : 'ok'
+    );
+  }
+}
+
+function playClip(clipId) {
+  const base = getBaseAsset();
+  const record = state.clips.find((item) => item.id === clipId);
+  if (!base || !record || !state.mixer) {
+    setStatus('Elige un modelo base antes de reproducir una action.', 'warn');
+    return;
+  }
+
+  state.mixer.stopAllAction();
+  state.mixer.setTime(0);
+
+  const clip = makeClipForBase(record, base);
+  const action = state.mixer.clipAction(clip, base.object);
+  action.reset();
+  action.setLoop(THREE.LoopRepeat, Infinity);
+  action.clampWhenFinished = false;
+  action.paused = false;
+  action.play();
+
+  state.activeClipId = record.id;
+  state.currentAction = action;
+  state.previewClip = clip;
+
+  els.activeActionBadge.textContent = record.name;
+  els.playPauseBtn.disabled = false;
+  els.playPauseBtn.textContent = 'Ⅱ';
+  els.timeline.disabled = false;
+  els.timeline.min = '0';
+  els.timeline.max = String(Math.max(clip.duration, 0.001));
+  els.timeline.value = '0';
+  els.currentTime.textContent = '0.00 s';
+  els.durationTime.textContent = formatDuration(clip.duration);
+
+  renderActions();
+
+  const compat = compatibility(record, base);
+  if (compat.ratio < 0.7) {
+    setStatus('La action "' + record.name + '" solo coincide con ' + Math.round(compat.ratio * 100) + '% de sus tracks en este rig.', 'warn');
+  } else {
+    setStatus('Reproduciendo "' + record.name + '" sobre ' + base.file.name + '.', 'ok');
+  }
+}
+
+function fitCameraToObject(object) {
+  const box = new THREE.Box3().setFromObject(object);
+  if (box.isEmpty()) {
+    camera.position.set(3, 2.4, 5);
+    controls.target.set(0, 1, 0);
+    controls.update();
+    return;
+  }
+
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const radius = Math.max(sphere.radius, 0.01);
+  const fov = THREE.MathUtils.degToRad(camera.fov);
+  const distance = radius / Math.sin(fov / 2) * 1.25;
+
+  const direction = new THREE.Vector3(1, 0.6, 1).normalize();
+  camera.position.copy(sphere.center).addScaledVector(direction, distance);
+  camera.near = Math.max(distance / 1000, 0.001);
+  camera.far = Math.max(distance * 100, 100);
+  camera.updateProjectionMatrix();
+
+  controls.target.copy(sphere.center);
+  controls.update();
+
+  grid.position.y = box.min.y;
+  const gridScale = Math.max(radius / 5, 0.05);
+  grid.scale.setScalar(gridScale);
+}
+
+function restoreBasePose() {
+  if (state.mixer) {
+    state.mixer.stopAllAction();
+    state.mixer.setTime(0);
+  }
+  const base = getBaseAsset();
+  if (base) {
+    base.object.traverse((node) => {
+      if (node.isSkinnedMesh && node.skeleton) node.skeleton.pose();
+    });
+    base.object.updateMatrixWorld(true);
+  }
+}
+
+function buildExportClips(base) {
+  const usedNames = new Set();
+  return getIncludedClips().map((record) => makeClipForBase(record, base, usedNames));
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportFBX() {
+  const base = getBaseAsset();
+  if (!base || state.exporting) return;
+  const clips = buildExportClips(base);
+  if (!clips.length) return;
+
+  state.exporting = true;
+  updateExportState();
+  setStatus('Generando FBX con ' + clips.length + ' actions...', 'info');
+
+  const previousAnimations = base.object.animations;
+  try {
+    restoreBasePose();
+    base.object.animations = clips;
+
+    const exporter = new FBXExporter();
+    const bytes = await exporter.parseAsync(base.object, {
+      preset: els.presetSelect.value,
+      animations: clips,
+      includeAnimations: true,
+      embedTextures: true,
+      fps: 30,
+    });
+
+    const blob = new Blob([bytes], { type: 'application/octet-stream' });
+    const filename = stripExt(base.file.name) + '_all_actions.fbx';
+    downloadBlob(blob, filename);
+    setStatus('FBX exportado: ' + filename + ' · ' + clips.length + ' actions.', 'ok');
+  } catch (error) {
+    console.error(error);
+    setStatus('Error al exportar FBX: ' + (error?.message || error), 'error');
+  } finally {
+    base.object.animations = previousAnimations;
+    state.exporting = false;
+    updateExportState();
+  }
+}
+
+async function exportGLB() {
+  const base = getBaseAsset();
+  if (!base || state.exporting) return;
+  const clips = buildExportClips(base);
+  if (!clips.length) return;
+
+  state.exporting = true;
+  updateExportState();
+  setStatus('Generando GLB de respaldo...', 'info');
+
+  try {
+    restoreBasePose();
+    const exporter = new GLTFExporter();
+    const result = await exporter.parseAsync(base.object, {
+      binary: true,
+      animations: clips,
+      trs: true,
+      onlyVisible: false,
+      maxTextureSize: 4096,
+    });
+
+    const filename = stripExt(base.file.name) + '_all_actions.glb';
+    downloadBlob(new Blob([result], { type: 'model/gltf-binary' }), filename);
+    setStatus('GLB exportado: ' + filename + ' · ' + clips.length + ' actions.', 'ok');
+  } catch (error) {
+    console.error(error);
+    setStatus('Error al exportar GLB: ' + (error?.message || error), 'error');
+  } finally {
+    state.exporting = false;
+    updateExportState();
+  }
+}
+
+function clearAll() {
+  const base = getBaseAsset();
+  if (base && base.object.parent === scene) scene.remove(base.object);
+  disposeMixer();
+  if (state.skeletonHelper) {
+    scene.remove(state.skeletonHelper);
+    state.skeletonHelper.dispose?.();
+  }
+
+  state.assets = [];
+  state.clips = [];
+  state.baseAssetId = null;
+  state.activeClipId = null;
+  state.skeletonHelper = null;
+
+  resetPlaybackUi();
+  renderAssets();
+  renderActions();
+  updateViewportEmpty();
+  setStatus('Proyecto limpio. Puedes importar otro lote de FBX.', 'info');
+}
+
+els.fileInput.addEventListener('change', (event) => importFiles(event.target.files));
+['dragenter', 'dragover'].forEach((type) => els.dropZone.addEventListener(type, (event) => {
+  event.preventDefault();
+  els.dropZone.classList.add('dragging');
+}));
+['dragleave', 'drop'].forEach((type) => els.dropZone.addEventListener(type, (event) => {
+  event.preventDefault();
+  els.dropZone.classList.remove('dragging');
+}));
+els.dropZone.addEventListener('drop', (event) => importFiles(event.dataTransfer.files));
+
+els.clearAllBtn.addEventListener('click', clearAll);
+els.actionSearch.addEventListener('input', renderActions);
+els.fitCameraBtn.addEventListener('click', () => {
+  const base = getBaseAsset();
+  if (base) fitCameraToObject(base.object);
+});
+els.toggleSkeletonBtn.addEventListener('click', () => {
+  state.skeletonVisible = !state.skeletonVisible;
+  if (state.skeletonHelper) state.skeletonHelper.visible = state.skeletonVisible;
+  els.toggleSkeletonBtn.textContent = state.skeletonVisible ? 'Ocultar huesos' : 'Esqueleto';
+});
+els.playPauseBtn.addEventListener('click', () => {
+  if (!state.currentAction) return;
+  state.currentAction.paused = !state.currentAction.paused;
+  els.playPauseBtn.textContent = state.currentAction.paused ? '▶' : 'Ⅱ';
+});
+els.speedSelect.addEventListener('change', () => {
+  if (state.mixer) state.mixer.timeScale = Number(els.speedSelect.value);
+});
+els.timeline.addEventListener('pointerdown', () => { state.isScrubbing = true; });
+window.addEventListener('pointerup', () => { state.isScrubbing = false; });
+els.timeline.addEventListener('input', () => {
+  if (!state.mixer || !state.previewClip) return;
+  const time = Number(els.timeline.value);
+  state.mixer.setTime(time);
+  els.currentTime.textContent = formatDuration(time);
+});
+els.exportFbxBtn.addEventListener('click', exportFBX);
+els.exportGlbBtn.addEventListener('click', exportGLB);
+
+function resize() {
+  const width = Math.max(1, els.viewport.clientWidth);
+  const height = Math.max(1, els.viewport.clientHeight);
+  renderer.setSize(width, height, false);
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(els.viewport);
+resize();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = Math.min(clock.getDelta(), 0.05);
+
+  if (state.mixer) state.mixer.update(delta);
+  controls.update();
+
+  if (state.currentAction && state.previewClip && !state.isScrubbing) {
+    const duration = Math.max(state.previewClip.duration, 0.001);
+    const time = ((state.currentAction.time % duration) + duration) % duration;
+    els.timeline.value = String(time);
+    els.currentTime.textContent = formatDuration(time);
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+
+renderAssets();
+renderActions();
+updateViewportEmpty();
