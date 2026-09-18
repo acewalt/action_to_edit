@@ -1814,52 +1814,28 @@ function restoreHierarchySnapshot(root, snapshot) {
 function restoreAssetRest(root, asset) {
   if (!root || !asset) return;
 
-  // Restore the imported OBJECT hierarchy first (root/armature rotations,
-  // scales, offsets), then force the skeleton from inverse bind matrices.
-  // This is the real static bind/rest pose and cannot inherit the Action that
-  // is currently playing in the main viewport.
-  restoreHierarchySnapshot(root, asset.restHierarchy);
-  forceBindPose(root);
-}
+  // Same rest source used by retargeting.js. Do not rebuild from inverse skin
+  // binds here: Redefine Rest Pose must edit the armature hierarchy that the
+  // animation was authored against, not a mesh-bind reconstruction.
+  const restored =
+    restoreHierarchySnapshot(root, asset.restHierarchy);
 
-function forceBindPose(root) {
-  if (!root) return;
-
-  const skeletons = new Set();
-
-  root.traverse((node) => {
-    if (node.isSkinnedMesh && node.skeleton) {
-      skeletons.add(node.skeleton);
-    }
-  });
-
-  for (const skeleton of skeletons) {
-    skeleton.pose();
+  if (!restored && asset.restPose) {
+    applyRestPose(root, asset.restPose);
   }
 
   root.updateMatrixWorld(true);
 
-  for (const skeleton of skeletons) {
-    skeleton.update();
-  }
+  root.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.update();
+    }
+  });
 }
 
 function applyRestPose(object, restPose) {
   if (!object) return;
 
-  // A Source/Target asset may currently be animated in the main viewport.
-  // Skeleton.pose() restores the bind pose independently of that live state.
-  object.traverse((node) => {
-    if (node.isSkinnedMesh && node.skeleton) {
-      node.skeleton.pose();
-    }
-  });
-
-  // Only restore BONE transforms from the captured import pose.
-  // Rest maps are name-based and complex Blender rigs can contain duplicate
-  // object/control names; applying those transforms to meshes/helpers can
-  // explode the preview scale. The armature/object transforms themselves are
-  // already preserved by SkeletonUtils.clone().
   if (restPose) {
     object.traverse((node) => {
       if (!node.isBone || !node.name) return;
@@ -1868,7 +1844,7 @@ function applyRestPose(object, restPose) {
       if (!rest) return;
 
       node.position.copy(rest.position);
-      node.quaternion.copy(rest.quaternion);
+      node.quaternion.copy(rest.quaternion).normalize();
       node.scale.copy(rest.scale);
     });
   }
