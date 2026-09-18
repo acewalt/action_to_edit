@@ -88,6 +88,7 @@ const state = {
   skeletonVisible: false,
   previewStage: null,
   projectionMode: 'perspective',
+  freeProjectionMode: 'perspective',
   orthoViewHeight: 4,
   axisViewActive: false,
   axisViewReturnMode: 'perspective',
@@ -1539,12 +1540,25 @@ function safePerspectiveDirection(direction) {
   return dir;
 }
 
+function updateProjectionPreferenceUi() {
+  const preferred = state.freeProjectionMode === 'orthographic'
+    ? 'orthographic'
+    : 'perspective';
+
+  els.toggleProjectionBtn.textContent =
+    preferred === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
+  els.toggleProjectionBtn.dataset.mode = preferred;
+  els.toggleProjectionBtn.title =
+    preferred === 'orthographic'
+      ? 'Modo libre: Ortográfica'
+      : 'Modo libre: Perspectiva';
+}
+
 function setActiveCamera(mode, { preserveView = true } = {}) {
   const nextMode = mode === 'orthographic' ? 'orthographic' : 'perspective';
 
   if (state.projectionMode === nextMode && camera) {
-    els.toggleProjectionBtn.textContent =
-      nextMode === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
+    updateProjectionPreferenceUi();
     return;
   }
 
@@ -1612,8 +1626,7 @@ function setActiveCamera(mode, { preserveView = true } = {}) {
 
   flushOrbitControls();
 
-  els.toggleProjectionBtn.textContent =
-    nextMode === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
+  updateProjectionPreferenceUi();
 }
 
 function axisViewDefinition(axisView) {
@@ -1719,7 +1732,7 @@ function updateBlenderAxisSnap(event) {
   if (axisView === drag.lastAxis) return;
 
   drag.lastAxis = axisView;
-  switchToAxisView(axisView, { returnMode: 'orthographic' });
+  switchToAxisView(axisView);
 }
 
 function endBlenderAxisSnap(event) {
@@ -1741,19 +1754,14 @@ function endBlenderAxisSnap(event) {
   flushOrbitControls();
 }
 
-function switchToAxisView(axisView, options = {}) {
+function switchToAxisView(axisView) {
   const def = axisViewDefinition(axisView);
   const target = controls.target.clone();
 
-  // Gimbal click: remember the mode the user was working in.
-  // Alt+MMB may explicitly force an orthographic workflow.
-  if (options.returnMode) {
-    state.axisViewReturnMode = options.returnMode;
-  } else if (!state.axisViewActive) {
-    state.axisViewReturnMode = camera.isPerspectiveCamera
-      ? 'perspective'
-      : 'orthographic';
-  }
+  // Axis views are ALWAYS orthographic, but they never change what the user
+  // selected for free navigation. That preference only changes through the
+  // Perspectiva / Ortográfica button.
+  state.axisViewReturnMode = state.freeProjectionMode;
 
   let distance = camera.position.distanceTo(target);
   if (!Number.isFinite(distance) || distance < 0.01) distance = 5;
@@ -1772,9 +1780,6 @@ function switchToAxisView(axisView, options = {}) {
   controls.target.copy(target);
   flushOrbitControls();
 
-  // Capture the exact snapped orientation AFTER OrbitControls has settled.
-  // Pan and zoom do not change this quaternion, so they will not trigger
-  // Auto Perspective. Only a genuine orbit/rotation will.
   state.axisViewQuaternion = camera.quaternion.clone();
   state.axisViewActive = true;
   state.axisAutoSwitchPending = false;
@@ -1783,8 +1788,7 @@ function switchToAxisView(axisView, options = {}) {
     state.axisViewReturnMode === 'perspective' ? 'Perspectiva' : 'Ortográfica';
 
   setStatus(
-    'Vista ortográfica alineada a ' + def.name +
-    ' · al rotar volverá a ' + returnLabel + '.',
+    'Vista ' + def.name + ' ortográfica · al orbitar: ' + returnLabel + '.',
     'info'
   );
 }
@@ -2161,6 +2165,7 @@ function clearAll() {
   state.axisViewActive = false;
   state.axisViewQuaternion = null;
   state.axisAutoSwitchPending = false;
+  state.freeProjectionMode = 'perspective';
   state.axisViewReturnMode = 'perspective';
   state.blenderNavDrag = null;
   hideRootGizmo();
@@ -2523,18 +2528,24 @@ renderer.domElement.addEventListener('auxclick', (event) => {
 controls.addEventListener('change', handleAxisViewAutoProjection);
 
 els.toggleProjectionBtn.addEventListener('click', () => {
-  const next = camera.isPerspectiveCamera ? 'orthographic' : 'perspective';
+  const next =
+    state.freeProjectionMode === 'perspective'
+      ? 'orthographic'
+      : 'perspective';
 
+  state.freeProjectionMode = next;
+  state.axisViewReturnMode = next;
   state.axisViewActive = false;
   state.axisViewQuaternion = null;
   state.axisAutoSwitchPending = false;
-  state.axisViewReturnMode = next;
 
   setActiveCamera(next, { preserveView: true });
+  updateProjectionPreferenceUi();
+
   setStatus(
     next === 'orthographic'
-      ? 'Vista ortográfica activada.'
-      : 'Vista en perspectiva activada.',
+      ? 'Modo libre establecido en Ortográfica.'
+      : 'Modo libre establecido en Perspectiva.',
     'info'
   );
 });
@@ -2649,4 +2660,5 @@ animate();
 renderAssets();
 renderActions();
 renderMotionPanel();
+updateProjectionPreferenceUi();
 updateViewportEmpty();
