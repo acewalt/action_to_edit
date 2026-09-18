@@ -17,8 +17,8 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-41';
-import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-41';
+} from './retargeting.js?v=20260918-42';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-42';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -1727,40 +1727,43 @@ function makeClipForBase(record, baseAsset, usedNames = null) {
   const baseRestPose = baseAsset?.restPose;
   const unitRatio = getAssetUnitScale(sourceAsset) / getAssetUnitScale(baseAsset);
 
-  for (const track of clip.tracks) {
-    let parsed;
-    try {
-      parsed = THREE.PropertyBinding.parseTrackName(track.name);
-    } catch {
-      continue;
-    }
+  const alreadyBakedForThisTarget =
+    Boolean(record.retargetInfo?.targetReady) &&
+    record.retargetInfo?.targetAssetId === baseAsset?.id;
 
-    const sourceNodeName = parsed.nodeName || '';
-    let targetNodeName = sourceNodeName;
+  if (!alreadyBakedForThisTarget) {
+    for (const track of clip.tracks) {
+      let parsed;
+      try {
+        parsed = THREE.PropertyBinding.parseTrackName(track.name);
+      } catch {
+        continue;
+      }
 
-    if (
-      record.sourceRootName &&
-      baseAsset.object.name &&
-      sourceNodeName === record.sourceRootName &&
-      record.sourceRootName !== baseAsset.object.name
-    ) {
-      targetNodeName = baseAsset.object.name;
-      const suffix = track.name.slice(record.sourceRootName.length);
-      track.name = baseAsset.object.name + suffix;
-    }
+      const sourceNodeName = parsed.nodeName || '';
+      let targetNodeName = sourceNodeName;
 
-    const sourceRest = sourceRestPose?.get(sourceNodeName);
-    const baseRest = baseRestPose?.get(targetNodeName);
+      if (
+        record.sourceRootName &&
+        baseAsset.object.name &&
+        sourceNodeName === record.sourceRootName &&
+        record.sourceRootName !== baseAsset.object.name
+      ) {
+        targetNodeName = baseAsset.object.name;
+        const suffix = track.name.slice(record.sourceRootName.length);
+        track.name = baseAsset.object.name + suffix;
+      }
 
-    if (parsed.propertyName === 'position') {
-      retargetPositionTrack(track, sourceRest, baseRest, unitRatio);
-    } else if (parsed.propertyName === 'quaternion') {
-      // Keep the animation's original local rotation delta relative to its
-      // source rest pose, then apply that delta to the base rig rest pose.
-      // This is the version that preserved the Mixamo motion correctly.
-      retargetQuaternionTrack(track, sourceRest, baseRest);
-    } else if (parsed.propertyName === 'scale') {
-      retargetScaleTrack(track, sourceRest, baseRest);
+      const sourceRest = sourceRestPose?.get(sourceNodeName);
+      const baseRest = baseRestPose?.get(targetNodeName);
+
+      if (parsed.propertyName === 'position') {
+        retargetPositionTrack(track, sourceRest, baseRest, unitRatio);
+      } else if (parsed.propertyName === 'quaternion') {
+        retargetQuaternionTrack(track, sourceRest, baseRest);
+      } else if (parsed.propertyName === 'scale') {
+        retargetScaleTrack(track, sourceRest, baseRest);
+      }
     }
   }
 
@@ -5633,8 +5636,33 @@ async function applyCurrentRetargeting() {
         validPairs: result.report.validPairs,
         totalPairs: result.report.totalPairs,
         scaleRatio: result.report.scaleRatio,
+        targetReady: true,
+        redirectedPairs: result.report.redirectedPairs || [],
+        weightedTargetBoneCount: result.report.weightedTargetBoneCount || 0,
       },
     };
+
+    const previousRetargetIds = new Set(
+      state.clips
+        .filter((item) =>
+          item.id !== sourceRecord.id &&
+          item.retargetInfo?.sourceClipId === sourceRecord.id &&
+          item.retargetInfo?.targetAssetId === targetAsset.id
+        )
+        .map((item) => item.id)
+    );
+
+    if (previousRetargetIds.size) {
+      state.clips = state.clips.filter(
+        (item) => !previousRetargetIds.has(item.id)
+      );
+
+      for (const asset of state.assets) {
+        asset.clips = asset.clips.filter(
+          (id) => !previousRetargetIds.has(id)
+        );
+      }
+    }
 
     state.clips.push(newRecord);
     if (!targetAsset.clips.includes(newRecord.id)) {
@@ -5655,6 +5683,13 @@ async function applyCurrentRetargeting() {
       ? ' · FK→IK de control-rig no se hornea en navegador; el mapping IK queda conservado en el preset.'
       : '';
 
+    const redirectedCount =
+      result.report.redirectedPairs?.length || 0;
+
+    const deformNote = redirectedCount
+      ? ' · ' + redirectedCount + ' controles FK redirigidos a huesos deform'
+      : '';
+
     setRetargetProgress(
       1,
       'Listo · ' +
@@ -5664,6 +5699,7 @@ async function applyCurrentRetargeting() {
         ' pares · ' +
         result.report.sampleCount +
         ' samples' +
+        deformNote +
         ikNote
     );
 
