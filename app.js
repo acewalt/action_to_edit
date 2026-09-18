@@ -126,6 +126,8 @@ els.viewport.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
+controls.screenSpacePanning = true;
+controls.zoomToCursor = false;
 controls.target.set(0, 1, 0);
 
 const rootGizmoProxy = new THREE.Object3D();
@@ -1494,43 +1496,111 @@ function perspectiveVisibleHeightAtTarget() {
   return 2 * distance * Math.tan(THREE.MathUtils.degToRad(perspectiveCamera.fov) * 0.5);
 }
 
+function orthographicVisibleHeight() {
+  return state.orthoViewHeight / Math.max(orthographicCamera.zoom || 1, 0.000001);
+}
+
+function flushOrbitControls() {
+  // OrbitControls keeps damping deltas internally. When swapping camera types
+  // those residual deltas can make the next orbit/pan feel as if the axes have
+  // changed. One non-damped update clears them.
+  const damping = controls.enableDamping;
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = damping;
+  controls.update();
+}
+
+function safePerspectiveDirection(direction) {
+  const dir = direction.clone().normalize();
+  const worldUp = new THREE.Vector3(0, 1, 0);
+
+  // Exact top/bottom views are singular with a Y-up perspective camera.
+  // Add a tiny forward component so OrbitControls returns to a stable Y-up
+  // coordinate system without a visible jump.
+  if (Math.abs(dir.dot(worldUp)) > 0.9995) {
+    dir.z += dir.y >= 0 ? 0.001 : -0.001;
+    dir.normalize();
+  }
+
+  return dir;
+}
+
 function setActiveCamera(mode, { preserveView = true } = {}) {
   const nextMode = mode === 'orthographic' ? 'orthographic' : 'perspective';
+
   if (state.projectionMode === nextMode && camera) {
-    els.toggleProjectionBtn.textContent = nextMode === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
+    els.toggleProjectionBtn.textContent =
+      nextMode === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
     return;
   }
 
   const previous = camera;
-  const previousPosition = previous.position.clone();
-  const previousQuaternion = previous.quaternion.clone();
-  const previousUp = previous.up.clone();
+  const target = controls.target.clone();
+  let viewDirection = previous.position.clone().sub(target);
+
+  if (viewDirection.lengthSq() < 1e-10) viewDirection.set(0.32, 0.12, 1);
+  viewDirection.normalize();
 
   if (nextMode === 'orthographic') {
     if (preserveView && previous.isPerspectiveCamera) {
       state.orthoViewHeight = perspectiveVisibleHeightAtTarget();
     }
+
+    orthographicCamera.zoom = 1;
     syncOrthographicFrustum(state.orthoViewHeight);
 
-    orthographicCamera.position.copy(previousPosition);
-    orthographicCamera.quaternion.copy(previousQuaternion);
-    orthographicCamera.up.copy(previousUp);
+    const distance = Math.max(previous.position.distanceTo(target), 0.1);
+    orthographicCamera.position.copy(target).addScaledVector(viewDirection, distance);
+    orthographicCamera.up.copy(previous.up);
+    orthographicCamera.lookAt(target);
+    orthographicCamera.updateMatrixWorld(true);
+
     camera = orthographicCamera;
   } else {
-    perspectiveCamera.position.copy(previousPosition);
-    perspectiveCamera.quaternion.copy(previousQuaternion);
-    perspectiveCamera.up.copy(previousUp);
+    let visibleHeight = perspectiveVisibleHeightAtTarget();
+
+    if (previous.isOrthographicCamera) {
+      visibleHeight = orthographicVisibleHeight();
+    }
+
+    const halfFov = THREE.MathUtils.degToRad(perspectiveCamera.fov) * 0.5;
+    const distance = Math.max(
+      visibleHeight / (2 * Math.tan(halfFov)),
+      0.1
+    );
+
+    // Perspective navigation ALWAYS returns to the application's Y-up world.
+    // Never inherit the special Z-up camera used only to draw top/bottom
+    // orthographic views.
+    viewDirection = safePerspectiveDirection(viewDirection);
+
+    perspectiveCamera.up.set(0, 1, 0);
+    perspectiveCamera.zoom = 1;
+    perspectiveCamera.position.copy(target).addScaledVector(viewDirection, distance);
+    perspectiveCamera.lookAt(target);
     perspectiveCamera.aspect = getViewportAspect();
+    perspectiveCamera.near = Math.max(distance / 5000, 0.001);
+    perspectiveCamera.far = Math.max(distance * 100, 1000);
     perspectiveCamera.updateProjectionMatrix();
+    perspectiveCamera.updateMatrixWorld(true);
+
     camera = perspectiveCamera;
+
+    controls.minDistance = Math.max(distance * 0.02, 0.01);
+    controls.maxDistance = Math.max(distance * 50, 100);
   }
 
   state.projectionMode = nextMode;
   controls.object = camera;
-  controls.update();
+  controls.target.copy(target);
 
   rootTransformControls.camera = camera;
-  els.toggleProjectionBtn.textContent = nextMode === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
+
+  flushOrbitControls();
+
+  els.toggleProjectionBtn.textContent =
+    nextMode === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
 }
 
 function axisViewDefinition(axisView) {
@@ -1564,7 +1634,7 @@ function switchToAxisView(axisView) {
   camera.updateMatrixWorld(true);
   controls.object = camera;
   controls.target.copy(target);
-  controls.update();
+  flushOrbitControls();
 
   setStatus('Vista ortográfica alineada a ' + def.name + '.', 'info');
 }
