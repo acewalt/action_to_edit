@@ -17,8 +17,8 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-42';
-import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-42';
+} from './retargeting.js?v=20260918-43';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-43';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -1456,6 +1456,94 @@ function applyRestPose(object, restPose) {
   });
 }
 
+function restoreAssetImportedRest(asset, object = asset?.object) {
+  if (!asset || !object) return false;
+
+  // First restore the exact hierarchy captured immediately after FBX import.
+  // This includes non-deform controls / structural nodes and does not depend
+  // on unique names.
+  const snapshot = asset.restHierarchy;
+  const nodes = [];
+  object.traverse((node) => nodes.push(node));
+
+  let restoredExact = false;
+
+  if (Array.isArray(snapshot) && snapshot.length === nodes.length) {
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const rest = snapshot[i];
+      if (!rest) continue;
+
+      if (Array.isArray(rest.position)) node.position.fromArray(rest.position);
+      if (Array.isArray(rest.quaternion)) {
+        node.quaternion.fromArray(rest.quaternion).normalize();
+      }
+      if (Array.isArray(rest.scale)) node.scale.fromArray(rest.scale);
+      node.visible = rest.visible !== false;
+    }
+
+    restoredExact = true;
+  } else if (asset.restPose) {
+    // Fallback for any hierarchy mismatch.
+    applyRestPose(object, asset.restPose);
+  }
+
+  // Then reconstruct the actual bind/rest pose of every skinned skeleton.
+  // This is the crucial isolation step: no Action previously played on the
+  // Target is allowed to survive into a new retarget Action.
+  const skeletons = new Set();
+
+  object.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      skeletons.add(node.skeleton);
+    }
+  });
+
+  for (const skeleton of skeletons) {
+    try {
+      skeleton.pose();
+    } catch {
+      // Keep the hierarchy snapshot fallback if a malformed skeleton cannot
+      // reconstruct from bone inverses.
+    }
+  }
+
+  object.updateMatrixWorld(true);
+
+  for (const skeleton of skeletons) {
+    skeleton.update();
+  }
+
+  return restoredExact || Boolean(asset.restPose);
+}
+
+function resetBasePlaybackToImportedRest(base) {
+  if (!base || !state.actionTransformNode) return;
+
+  // Throw away AnimationMixer binding caches as well as active actions.
+  // PropertyMixer caches "original" values when a track first binds; reusing
+  // those caches can make a sparse Action inherit a pose from an older Action.
+  if (state.mixer) {
+    try {
+      state.mixer.stopAllAction();
+      state.mixer.uncacheRoot(state.actionTransformNode);
+    } catch {
+      // A fresh mixer is created below regardless.
+    }
+  }
+
+  state.actionTransformNode.position.set(0, 0, 0);
+  state.actionTransformNode.quaternion.identity();
+  state.actionTransformNode.scale.set(1, 1, 1);
+
+  restoreAssetImportedRest(base, base.object);
+
+  state.actionTransformNode.updateMatrixWorld(true);
+  state.mixer = new THREE.AnimationMixer(state.actionTransformNode);
+  state.currentAction = null;
+  state.previewClip = null;
+}
+
 function getAssetUnitScale(asset) {
   const n = Number(asset?.unitScaleFactor);
   return Number.isFinite(n) && n > 0 ? n : 1;
@@ -2492,6 +2580,10 @@ function setBaseAsset(assetId) {
   disposeMixer();
   state.baseAssetId = next.id;
 
+  // A model base is always mounted from its imported bind/rest state, never
+  // from whichever Action was last previewed on this FBX.
+  restoreAssetImportedRest(next, next.object);
+
   // Reset the non-destructive Action Transform before mounting another rig.
   state.actionTransformNode.position.set(0, 0, 0);
   state.actionTransformNode.quaternion.identity();
@@ -2676,13 +2768,10 @@ function playClip(clipId, options = {}) {
     return;
   }
 
-  state.mixer.stopAllAction();
-  state.mixer.setTime(0);
-
-  state.actionTransformNode.position.set(0, 0, 0);
-  state.actionTransformNode.quaternion.identity();
-  state.actionTransformNode.scale.set(1, 1, 1);
-  state.actionTransformNode.updateMatrixWorld(true);
+  // Every Action starts from the target FBX's imported bind/rest pose.
+  // No transform from a previously played Target Action is allowed to carry
+  // over. A brand-new mixer also discards cached "original state" bindings.
+  resetBasePlaybackToImportedRest(base);
 
   const clip = makeClipForBase(record, base);
   const action = state.mixer.clipAction(clip, state.actionTransformNode);
@@ -2702,10 +2791,21 @@ function playClip(clipId, options = {}) {
   state.currentAction = action;
   state.previewClip = clip;
 
+  let initialTime = 0;
+
   if (Number.isFinite(options.preserveTime) && clip.duration > 0) {
-    const safeTime = THREE.MathUtils.clamp(options.preserveTime, 0, Math.max(clip.duration - 1e-5, 0));
-    state.mixer.setTime(safeTime);
+    initialTime = THREE.MathUtils.clamp(
+      options.preserveTime,
+      0,
+      Math.max(clip.duration - 1e-5, 0)
+    );
   }
+
+  // Evaluate the new Action immediately. This writes its strict rest baseline
+  // before the next render frame, so there is no one-frame flash of the old
+  // Target pose.
+  state.mixer.setTime(initialTime);
+
   if (options.preservePaused) action.paused = true;
 
   els.activeActionBadge.textContent = record.name;
@@ -2714,8 +2814,8 @@ function playClip(clipId, options = {}) {
   els.timeline.disabled = false;
   els.timeline.min = '0';
   els.timeline.max = String(Math.max(clip.duration, 0.001));
-  els.timeline.value = '0';
-  els.currentTime.textContent = '0.00 s';
+  els.timeline.value = String(initialTime);
+  els.currentTime.textContent = formatDuration(initialTime);
   els.durationTime.textContent = formatDuration(clip.duration);
 
   renderActions();
@@ -5639,6 +5739,10 @@ async function applyCurrentRetargeting() {
         targetReady: true,
         redirectedPairs: result.report.redirectedPairs || [],
         weightedTargetBoneCount: result.report.weightedTargetBoneCount || 0,
+        influentialTargetBoneCount:
+          result.report.influentialTargetBoneCount || 0,
+        restBaselineBoneCount:
+          result.report.restBaselineBoneCount || 0,
       },
     };
 
@@ -5687,7 +5791,14 @@ async function applyCurrentRetargeting() {
       result.report.redirectedPairs?.length || 0;
 
     const deformNote = redirectedCount
-      ? ' · ' + redirectedCount + ' controles FK redirigidos a huesos deform'
+      ? ' · ' + redirectedCount + ' controles FK redirigidos'
+      : '';
+
+    const baselineCount =
+      result.report.restBaselineBoneCount || 0;
+
+    const baselineNote = baselineCount
+      ? ' · Rest limpio fijado en ' + baselineCount + ' huesos'
       : '';
 
     setRetargetProgress(
@@ -5700,6 +5811,7 @@ async function applyCurrentRetargeting() {
         result.report.sampleCount +
         ' samples' +
         deformNote +
+        baselineNote +
         ikNote
     );
 
