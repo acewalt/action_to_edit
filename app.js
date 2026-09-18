@@ -28,6 +28,29 @@ const els = {
   currentTime: $('#currentTime'),
   durationTime: $('#durationTime'),
   speedSelect: $('#speedSelect'),
+  toggleMotionPanelBtn: $('#toggleMotionPanelBtn'),
+  motionPanel: $('#motionPanel'),
+  motionPanelBody: $('#motionPanelBody'),
+  motionPanelActionName: $('#motionPanelActionName'),
+  resetMotionPanelBtn: $('#resetMotionPanelBtn'),
+  overdriveRange: $('#overdriveRange'),
+  overdriveValue: $('#overdriveValue'),
+  armSpaceRange: $('#armSpaceRange'),
+  armSpaceValue: $('#armSpaceValue'),
+  trimStartRange: $('#trimStartRange'),
+  trimEndRange: $('#trimEndRange'),
+  trimRangeFill: $('#trimRangeFill'),
+  trimFramesLabel: $('#trimFramesLabel'),
+  trimStartValue: $('#trimStartValue'),
+  trimEndValue: $('#trimEndValue'),
+  resetTrimBtn: $('#resetTrimBtn'),
+  mirrorActionCheckbox: $('#mirrorActionCheckbox'),
+  rootTargetSelect: $('#rootTargetSelect'),
+  rootResolvedName: $('#rootResolvedName'),
+  rootOffsetX: $('#rootOffsetX'),
+  rootOffsetY: $('#rootOffsetY'),
+  rootOffsetZ: $('#rootOffsetZ'),
+  resetRootOffsetBtn: $('#resetRootOffsetBtn'),
   toggleSkeletonBtn: $('#toggleSkeletonBtn'),
   fitCameraBtn: $('#fitCameraBtn'),
   statusBar: $('#statusBar'),
@@ -52,6 +75,7 @@ const state = {
   skeletonHelper: null,
   skeletonVisible: false,
   previewStage: null,
+  motionPanelOpen: true,
   isScrubbing: false,
   exporting: false,
 };
@@ -130,6 +154,307 @@ function isEmptyClip(record) {
     record.clip.tracks.length === 0 ||
     record.clip.duration <= 1e-6
   );
+}
+
+function defaultActionEdit() {
+  return {
+    overdrive: 50,
+    armSpace: 50,
+    trimStart: 0,
+    trimEnd: 100,
+    mirror: false,
+    rootTarget: 'auto',
+    rootOffset: { x: 0, y: 0, z: 0 },
+  };
+}
+
+function ensureActionEdit(record) {
+  if (!record) return defaultActionEdit();
+  if (!record.edit) record.edit = defaultActionEdit();
+  if (!record.edit.rootOffset) record.edit.rootOffset = { x: 0, y: 0, z: 0 };
+  return record.edit;
+}
+
+function getActiveRecord() {
+  return state.clips.find((record) => record.id === state.activeClipId) || null;
+}
+
+function collectBoneNames(object) {
+  const names = [];
+  object?.traverse((node) => {
+    if (node.isBone && node.name) names.push(node.name);
+  });
+  return [...new Set(names)];
+}
+
+function resolveRootTarget(record, baseAsset) {
+  const edit = ensureActionEdit(record);
+  if (!baseAsset) return '';
+
+  if (edit.rootTarget === 'object') return baseAsset.object.name || '';
+
+  if (edit.rootTarget && edit.rootTarget !== 'auto') {
+    return edit.rootTarget;
+  }
+
+  const boneNames = collectBoneNames(baseAsset.object);
+  return (
+    boneNames.find((name) => /(^|[:_])hips?$/i.test(name)) ||
+    boneNames.find((name) => /hips?/i.test(name)) ||
+    boneNames.find((name) => /root/i.test(name)) ||
+    boneNames[0] ||
+    baseAsset.object.name ||
+    ''
+  );
+}
+
+function swapLeftRightName(name) {
+  const token = '__ACTION_TO_EDIT_SIDE__';
+  return name
+    .replace(/left/ig, (m) => token + (m === 'LEFT' ? 'U' : m === 'Left' ? 'T' : 'L'))
+    .replace(/right/ig, (m) => {
+      if (m === 'RIGHT') return 'LEFT';
+      if (m === 'Right') return 'Left';
+      return 'left';
+    })
+    .replace(new RegExp(token + 'U', 'g'), 'RIGHT')
+    .replace(new RegExp(token + 'T', 'g'), 'Right')
+    .replace(new RegExp(token + 'L', 'g'), 'right');
+}
+
+function mirrorAnimationClip(clip) {
+  for (const track of clip.tracks) {
+    let parsed;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      continue;
+    }
+
+    const nodeName = parsed.nodeName || '';
+    if (nodeName) {
+      const swapped = swapLeftRightName(nodeName);
+      if (swapped !== nodeName) {
+        track.name = swapped + track.name.slice(nodeName.length);
+      }
+    }
+
+    if (parsed.propertyName === 'position') {
+      for (let i = 0; i < track.values.length; i += 3) track.values[i] *= -1;
+    } else if (parsed.propertyName === 'quaternion') {
+      // Mirror across the character sagittal plane (X -> -X).
+      for (let i = 0; i < track.values.length; i += 4) {
+        track.values[i + 1] *= -1;
+        track.values[i + 2] *= -1;
+      }
+    }
+  }
+}
+
+function scaleQuaternionDelta(qRest, qAnimated, factor, out) {
+  const invRest = qRest.clone().invert();
+  const delta = invRest.multiply(qAnimated).normalize();
+
+  let w = THREE.MathUtils.clamp(delta.w, -1, 1);
+  let angle = 2 * Math.acos(w);
+  if (angle > Math.PI) angle -= Math.PI * 2;
+
+  const s = Math.sqrt(Math.max(1 - w * w, 0));
+  const axis = s < 1e-6
+    ? new THREE.Vector3(1, 0, 0)
+    : new THREE.Vector3(delta.x / s, delta.y / s, delta.z / s);
+
+  const scaled = new THREE.Quaternion().setFromAxisAngle(axis, angle * factor);
+  return out.copy(qRest).multiply(scaled).normalize();
+}
+
+function applyOverdrive(clip, baseAsset, value) {
+  const factor = Number(value) / 50;
+  if (!Number.isFinite(factor) || Math.abs(factor - 1) < 1e-6) return;
+
+  const qAnim = new THREE.Quaternion();
+  const qOut = new THREE.Quaternion();
+
+  for (const track of clip.tracks) {
+    let parsed;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      continue;
+    }
+
+    const rest = baseAsset?.restPose?.get(parsed.nodeName);
+    if (!rest) continue;
+
+    if (parsed.propertyName === 'position') {
+      for (let i = 0; i < track.values.length; i += 3) {
+        track.values[i] = rest.position.x + (track.values[i] - rest.position.x) * factor;
+        track.values[i + 1] = rest.position.y + (track.values[i + 1] - rest.position.y) * factor;
+        track.values[i + 2] = rest.position.z + (track.values[i + 2] - rest.position.z) * factor;
+      }
+    } else if (parsed.propertyName === 'scale') {
+      for (let i = 0; i < track.values.length; i += 3) {
+        track.values[i] = rest.scale.x + (track.values[i] - rest.scale.x) * factor;
+        track.values[i + 1] = rest.scale.y + (track.values[i + 1] - rest.scale.y) * factor;
+        track.values[i + 2] = rest.scale.z + (track.values[i + 2] - rest.scale.z) * factor;
+      }
+    } else if (parsed.propertyName === 'quaternion') {
+      for (let i = 0; i < track.values.length; i += 4) {
+        qAnim.set(track.values[i], track.values[i + 1], track.values[i + 2], track.values[i + 3]).normalize();
+        scaleQuaternionDelta(rest.quaternion, qAnim, factor, qOut);
+        track.values[i] = qOut.x;
+        track.values[i + 1] = qOut.y;
+        track.values[i + 2] = qOut.z;
+        track.values[i + 3] = qOut.w;
+      }
+    }
+  }
+}
+
+function applyArmSpace(clip, value) {
+  const normalized = (Number(value) - 50) / 50;
+  if (!Number.isFinite(normalized) || Math.abs(normalized) < 1e-6) return;
+
+  const angle = THREE.MathUtils.degToRad(18 * normalized);
+  const qAdd = new THREE.Quaternion();
+  const q = new THREE.Quaternion();
+
+  for (const track of clip.tracks) {
+    let parsed;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      continue;
+    }
+
+    if (parsed.propertyName !== 'quaternion') continue;
+    const nodeName = parsed.nodeName || '';
+
+    const isLeft = /leftarm$/i.test(nodeName) || /leftupperarm/i.test(nodeName);
+    const isRight = /rightarm$/i.test(nodeName) || /rightupperarm/i.test(nodeName);
+    if (!isLeft && !isRight) continue;
+
+    qAdd.setFromAxisAngle(new THREE.Vector3(0, 0, 1), isLeft ? angle : -angle);
+
+    for (let i = 0; i < track.values.length; i += 4) {
+      q.set(track.values[i], track.values[i + 1], track.values[i + 2], track.values[i + 3]).normalize();
+      q.multiply(qAdd).normalize();
+      track.values[i] = q.x;
+      track.values[i + 1] = q.y;
+      track.values[i + 2] = q.z;
+      track.values[i + 3] = q.w;
+    }
+  }
+}
+
+function applyRootOffset(clip, record, baseAsset) {
+  const edit = ensureActionEdit(record);
+  const offset = edit.rootOffset || { x: 0, y: 0, z: 0 };
+  const ox = Number(offset.x) || 0;
+  const oy = Number(offset.y) || 0;
+  const oz = Number(offset.z) || 0;
+  if (Math.abs(ox) + Math.abs(oy) + Math.abs(oz) < 1e-9) return;
+
+  const targetName = resolveRootTarget(record, baseAsset);
+  if (!targetName) return;
+
+  let positionTrack = null;
+  for (const track of clip.tracks) {
+    let parsed;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      continue;
+    }
+
+    if (parsed.nodeName === targetName && parsed.propertyName === 'position') {
+      positionTrack = track;
+      break;
+    }
+  }
+
+  if (positionTrack) {
+    for (let i = 0; i < positionTrack.values.length; i += 3) {
+      positionTrack.values[i] += ox;
+      positionTrack.values[i + 1] += oy;
+      positionTrack.values[i + 2] += oz;
+    }
+    return;
+  }
+
+  const rest = baseAsset?.restPose?.get(targetName);
+  if (!rest) return;
+
+  const duration = Math.max(clip.duration || 0, 1 / 30);
+  clip.tracks.push(new THREE.VectorKeyframeTrack(
+    targetName + '.position',
+    [0, duration],
+    [
+      rest.position.x + ox, rest.position.y + oy, rest.position.z + oz,
+      rest.position.x + ox, rest.position.y + oy, rest.position.z + oz,
+    ]
+  ));
+}
+
+function trimClipByPercent(clip, startPct, endPct) {
+  const duration = Math.max(clip.duration || 0, 0);
+  const start = THREE.MathUtils.clamp(Number(startPct) || 0, 0, 100) / 100 * duration;
+  const end = THREE.MathUtils.clamp(Number(endPct) || 100, 0, 100) / 100 * duration;
+
+  if (duration <= 0 || start <= 1e-8 && end >= duration - 1e-8) return;
+  if (end <= start + 1e-6) return;
+
+  const nextTracks = [];
+
+  for (const track of clip.tracks) {
+    const valueSize = track.getValueSize();
+    const interpolant = track.createInterpolant(new track.ValueBufferType(valueSize));
+    const times = [];
+    const values = [];
+
+    const pushSample = (time, shifted) => {
+      const sample = interpolant.evaluate(time);
+      times.push(shifted);
+      for (let i = 0; i < valueSize; i++) values.push(sample[i]);
+    };
+
+    pushSample(start, 0);
+
+    for (let i = 0; i < track.times.length; i++) {
+      const t = track.times[i];
+      if (t > start + 1e-7 && t < end - 1e-7) {
+        times.push(t - start);
+        const base = i * valueSize;
+        for (let k = 0; k < valueSize; k++) values.push(track.values[base + k]);
+      }
+    }
+
+    pushSample(end, end - start);
+
+    const next = new track.constructor(
+      track.name,
+      times,
+      values,
+      track.getInterpolation()
+    );
+    nextTracks.push(next);
+  }
+
+  clip.tracks = nextTracks;
+  clip.duration = end - start;
+}
+
+function applyActionEditPipeline(clip, record, baseAsset) {
+  const edit = ensureActionEdit(record);
+
+  if (edit.mirror) mirrorAnimationClip(clip);
+  applyOverdrive(clip, baseAsset, edit.overdrive);
+  applyArmSpace(clip, edit.armSpace);
+  applyRootOffset(clip, record, baseAsset);
+  trimClipByPercent(clip, edit.trimStart, edit.trimEnd);
+
+  clip.resetDuration();
+  return clip;
 }
 
 function captureRestPose(object) {
@@ -489,6 +814,7 @@ function makeClipForBase(record, baseAsset, usedNames = null) {
   }
 
   clip.resetDuration();
+  applyActionEditPipeline(clip, record, baseAsset);
   return clip;
 }
 
@@ -533,6 +859,99 @@ function normalizePreview(object) {
   object.updateMatrixWorld(true);
 
   return true;
+}
+
+function populateRootTargetSelect(record, base) {
+  const edit = ensureActionEdit(record);
+  const current = edit.rootTarget || 'auto';
+  const boneNames = collectBoneNames(base?.object);
+
+  els.rootTargetSelect.innerHTML =
+    '<option value="auto">Auto · Hips</option>' +
+    '<option value="object">Objeto root</option>' +
+    boneNames.map((name) =>
+      '<option value="' + name.replace(/"/g, '&quot;') + '">' + name + '</option>'
+    ).join('');
+
+  const valid = current === 'auto' || current === 'object' || boneNames.includes(current);
+  edit.rootTarget = valid ? current : 'auto';
+  els.rootTargetSelect.value = edit.rootTarget;
+}
+
+function updateTrimVisuals(edit, record) {
+  const start = Number(edit.trimStart) || 0;
+  const end = Number(edit.trimEnd) || 100;
+  els.trimStartValue.textContent = String(Math.round(start));
+  els.trimEndValue.textContent = String(Math.round(end));
+  els.trimRangeFill.style.left = start + '%';
+  els.trimRangeFill.style.right = (100 - end) + '%';
+
+  const totalFrames = Math.max(0, Math.round((record?.clip?.duration || 0) * 30));
+  const keptFrames = Math.max(0, Math.round(totalFrames * Math.max(end - start, 0) / 100));
+  els.trimFramesLabel.textContent = keptFrames + ' / ' + totalFrames + ' Frames';
+}
+
+function renderMotionPanel() {
+  const record = getActiveRecord();
+  const base = getBaseAsset();
+  const enabled = Boolean(record && base && !isEmptyClip(record));
+
+  els.motionPanel.classList.toggle('collapsed', !state.motionPanelOpen);
+  els.motionPanelBody.classList.toggle('is-disabled', !enabled);
+  els.resetMotionPanelBtn.disabled = !enabled;
+
+  if (!enabled) {
+    els.motionPanelActionName.textContent = record ? record.name : 'Selecciona una Action';
+    return;
+  }
+
+  const edit = ensureActionEdit(record);
+  els.motionPanelActionName.textContent = record.name;
+
+  els.overdriveRange.value = String(edit.overdrive);
+  els.overdriveValue.textContent = String(edit.overdrive);
+  els.armSpaceRange.value = String(edit.armSpace);
+  els.armSpaceValue.textContent = String(edit.armSpace);
+
+  els.trimStartRange.value = String(edit.trimStart);
+  els.trimEndRange.value = String(edit.trimEnd);
+  updateTrimVisuals(edit, record);
+
+  els.mirrorActionCheckbox.checked = Boolean(edit.mirror);
+
+  populateRootTargetSelect(record, base);
+  els.rootResolvedName.textContent =
+    edit.rootTarget === 'auto'
+      ? 'Auto → ' + (resolveRootTarget(record, base) || '—')
+      : edit.rootTarget === 'object'
+        ? 'Objeto → ' + (base.object.name || 'root')
+        : edit.rootTarget;
+
+  els.rootOffsetX.value = String(edit.rootOffset.x ?? 0);
+  els.rootOffsetY.value = String(edit.rootOffset.y ?? 0);
+  els.rootOffsetZ.value = String(edit.rootOffset.z ?? 0);
+}
+
+function selectActionForEditing(recordId, { openPanel = true } = {}) {
+  const record = state.clips.find((item) => item.id === recordId);
+  if (!record) return;
+
+  state.activeClipId = record.id;
+  if (openPanel) state.motionPanelOpen = true;
+  renderMotionPanel();
+  renderActions();
+}
+
+function refreshActivePreview() {
+  const record = getActiveRecord();
+  if (!record || !state.mixer || isEmptyClip(record)) {
+    renderMotionPanel();
+    return;
+  }
+
+  const oldTime = state.currentAction?.time || 0;
+  const wasPaused = Boolean(state.currentAction?.paused);
+  playClip(record.id, { preserveTime: oldTime, preservePaused: wasPaused, silent: true });
 }
 
 function renderAssets() {
@@ -614,7 +1033,15 @@ function renderActions() {
     const playButton = node.querySelector('.action-play');
     playButton.disabled = empty;
     playButton.title = empty ? 'Esta action no contiene tracks' : 'Reproducir';
-    playButton.addEventListener('click', () => playClip(record.id));
+    playButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      playClip(record.id);
+    });
+
+    node.addEventListener('click', (event) => {
+      if (event.target.closest('button, input, label')) return;
+      selectActionForEditing(record.id);
+    });
 
     const nameInput = node.querySelector('.action-name');
     const renameButton = node.querySelector('.action-rename');
@@ -721,6 +1148,7 @@ function resetPlaybackUi() {
   els.timeline.max = '1';
   els.currentTime.textContent = '0.00 s';
   els.durationTime.textContent = '0.00 s';
+  renderMotionPanel();
 }
 
 function disposeMixer() {
@@ -764,6 +1192,7 @@ function setBaseAsset(assetId) {
   fitCameraToObject(next.object);
   renderAssets();
   renderActions();
+  renderMotionPanel();
 
   const actionTotal = state.clips.length;
   setStatus('Modelo base: ' + next.file.name + '. Hay ' + actionTotal + ' action' + (actionTotal === 1 ? '' : 's') + ' disponibles.', 'ok');
@@ -856,6 +1285,7 @@ async function importFiles(fileList) {
           clip: cloned,
           empty: isEmpty,
           include: !isEmpty,
+          edit: defaultActionEdit(),
         };
         state.clips.push(record);
         assetClips.push(record.id);
@@ -903,7 +1333,7 @@ async function importFiles(fileList) {
   }
 }
 
-function playClip(clipId) {
+function playClip(clipId, options = {}) {
   const base = getBaseAsset();
   const record = state.clips.find((item) => item.id === clipId);
   if (!base || !record || !state.mixer) {
@@ -931,9 +1361,15 @@ function playClip(clipId) {
   state.currentAction = action;
   state.previewClip = clip;
 
+  if (Number.isFinite(options.preserveTime) && clip.duration > 0) {
+    const safeTime = THREE.MathUtils.clamp(options.preserveTime, 0, Math.max(clip.duration - 1e-5, 0));
+    state.mixer.setTime(safeTime);
+  }
+  if (options.preservePaused) action.paused = true;
+
   els.activeActionBadge.textContent = record.name;
   els.playPauseBtn.disabled = false;
-  els.playPauseBtn.textContent = 'Ⅱ';
+  els.playPauseBtn.textContent = action.paused ? '▶' : 'Ⅱ';
   els.timeline.disabled = false;
   els.timeline.min = '0';
   els.timeline.max = String(Math.max(clip.duration, 0.001));
@@ -942,8 +1378,10 @@ function playClip(clipId) {
   els.durationTime.textContent = formatDuration(clip.duration);
 
   renderActions();
+  renderMotionPanel();
 
   const compat = compatibility(record, base);
+  if (options.silent) return;
   if (compat.ratio < 0.7) {
     setStatus('La action "' + record.name + '" solo coincide con ' + Math.round(compat.ratio * 100) + '% de sus tracks en este rig.', 'warn');
   } else {
@@ -1210,6 +1648,7 @@ function clearAll() {
   state.skeletonHelper = null;
 
   resetPlaybackUi();
+  renderMotionPanel();
   renderAssets();
   renderActions();
   updateViewportEmpty();
@@ -1283,6 +1722,110 @@ els.renameCompatibleActionsBtn.addEventListener('click', () => {
     'ok'
   );
 });
+els.toggleMotionPanelBtn.addEventListener('click', () => {
+  state.motionPanelOpen = !state.motionPanelOpen;
+  renderMotionPanel();
+});
+
+els.overdriveRange.addEventListener('input', () => {
+  const record = getActiveRecord();
+  if (!record) return;
+  const edit = ensureActionEdit(record);
+  edit.overdrive = Number(els.overdriveRange.value);
+  els.overdriveValue.textContent = String(edit.overdrive);
+  refreshActivePreview();
+});
+
+els.armSpaceRange.addEventListener('input', () => {
+  const record = getActiveRecord();
+  if (!record) return;
+  const edit = ensureActionEdit(record);
+  edit.armSpace = Number(els.armSpaceRange.value);
+  els.armSpaceValue.textContent = String(edit.armSpace);
+  refreshActivePreview();
+});
+
+function syncTrimFromUi(changed) {
+  const record = getActiveRecord();
+  if (!record) return;
+  const edit = ensureActionEdit(record);
+
+  let start = Number(els.trimStartRange.value);
+  let end = Number(els.trimEndRange.value);
+
+  if (changed === 'start' && start > end - 1) start = end - 1;
+  if (changed === 'end' && end < start + 1) end = start + 1;
+
+  start = THREE.MathUtils.clamp(start, 0, 99);
+  end = THREE.MathUtils.clamp(end, 1, 100);
+
+  edit.trimStart = start;
+  edit.trimEnd = end;
+  els.trimStartRange.value = String(start);
+  els.trimEndRange.value = String(end);
+  updateTrimVisuals(edit, record);
+  refreshActivePreview();
+}
+
+els.trimStartRange.addEventListener('input', () => syncTrimFromUi('start'));
+els.trimEndRange.addEventListener('input', () => syncTrimFromUi('end'));
+
+els.resetTrimBtn.addEventListener('click', () => {
+  const record = getActiveRecord();
+  if (!record) return;
+  const edit = ensureActionEdit(record);
+  edit.trimStart = 0;
+  edit.trimEnd = 100;
+  renderMotionPanel();
+  refreshActivePreview();
+});
+
+els.mirrorActionCheckbox.addEventListener('change', () => {
+  const record = getActiveRecord();
+  if (!record) return;
+  ensureActionEdit(record).mirror = els.mirrorActionCheckbox.checked;
+  refreshActivePreview();
+});
+
+els.rootTargetSelect.addEventListener('change', () => {
+  const record = getActiveRecord();
+  if (!record) return;
+  ensureActionEdit(record).rootTarget = els.rootTargetSelect.value;
+  renderMotionPanel();
+  refreshActivePreview();
+});
+
+function syncRootOffset() {
+  const record = getActiveRecord();
+  if (!record) return;
+  const edit = ensureActionEdit(record);
+  edit.rootOffset.x = Number(els.rootOffsetX.value) || 0;
+  edit.rootOffset.y = Number(els.rootOffsetY.value) || 0;
+  edit.rootOffset.z = Number(els.rootOffsetZ.value) || 0;
+  refreshActivePreview();
+}
+
+els.rootOffsetX.addEventListener('input', syncRootOffset);
+els.rootOffsetY.addEventListener('input', syncRootOffset);
+els.rootOffsetZ.addEventListener('input', syncRootOffset);
+
+els.resetRootOffsetBtn.addEventListener('click', () => {
+  const record = getActiveRecord();
+  if (!record) return;
+  const edit = ensureActionEdit(record);
+  edit.rootOffset = { x: 0, y: 0, z: 0 };
+  renderMotionPanel();
+  refreshActivePreview();
+});
+
+els.resetMotionPanelBtn.addEventListener('click', () => {
+  const record = getActiveRecord();
+  if (!record) return;
+  record.edit = defaultActionEdit();
+  renderMotionPanel();
+  refreshActivePreview();
+});
+
 els.fitCameraBtn.addEventListener('click', () => {
   const base = getBaseAsset();
   if (base) {
@@ -1355,4 +1898,5 @@ animate();
 
 renderAssets();
 renderActions();
+renderMotionPanel();
 updateViewportEmpty();
