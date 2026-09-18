@@ -89,6 +89,10 @@ const state = {
   previewStage: null,
   projectionMode: 'perspective',
   orthoViewHeight: 4,
+  axisViewActive: false,
+  axisViewReturnMode: 'perspective',
+  axisViewQuaternion: null,
+  axisAutoSwitchPending: false,
   motionPanelOpen: true,
   rootGizmoEnabled: false,
   rootGizmoDragging: false,
@@ -1619,6 +1623,15 @@ function switchToAxisView(axisView) {
   const def = axisViewDefinition(axisView);
   const target = controls.target.clone();
 
+  // Remember the mode the user was actually working in before entering the
+  // temporary axis-aligned view. Clicking another axis while already snapped
+  // must preserve that original mode.
+  if (!state.axisViewActive) {
+    state.axisViewReturnMode = camera.isPerspectiveCamera
+      ? 'perspective'
+      : 'orthographic';
+  }
+
   let distance = camera.position.distanceTo(target);
   if (!Number.isFinite(distance) || distance < 0.01) distance = 5;
 
@@ -1636,7 +1649,67 @@ function switchToAxisView(axisView) {
   controls.target.copy(target);
   flushOrbitControls();
 
-  setStatus('Vista ortográfica alineada a ' + def.name + '.', 'info');
+  // Capture the exact snapped orientation AFTER OrbitControls has settled.
+  // Pan and zoom do not change this quaternion, so they will not trigger
+  // Auto Perspective. Only a genuine orbit/rotation will.
+  state.axisViewQuaternion = camera.quaternion.clone();
+  state.axisViewActive = true;
+  state.axisAutoSwitchPending = false;
+
+  const returnLabel =
+    state.axisViewReturnMode === 'perspective' ? 'Perspectiva' : 'Ortográfica';
+
+  setStatus(
+    'Vista ortográfica alineada a ' + def.name +
+    ' · al rotar volverá a ' + returnLabel + '.',
+    'info'
+  );
+}
+
+function handleAxisViewAutoProjection() {
+  if (
+    !state.axisViewActive ||
+    !state.axisViewQuaternion ||
+    state.axisAutoSwitchPending ||
+    state.rootGizmoDragging
+  ) {
+    return;
+  }
+
+  const angle = camera.quaternion.angleTo(state.axisViewQuaternion);
+
+  // About 0.35 degrees: enough to ignore floating-point noise while still
+  // feeling immediate on the first deliberate orbit gesture.
+  if (angle < THREE.MathUtils.degToRad(0.35)) return;
+
+  const returnMode = state.axisViewReturnMode;
+  state.axisViewActive = false;
+  state.axisViewQuaternion = null;
+
+  if (returnMode !== state.projectionMode) {
+    state.axisAutoSwitchPending = true;
+
+    // Do the camera-type swap outside OrbitControls' own change dispatch.
+    // This avoids re-entering update() halfway through an orbit event.
+    requestAnimationFrame(() => {
+      setActiveCamera(returnMode, { preserveView: true });
+      state.axisAutoSwitchPending = false;
+
+      setStatus(
+        returnMode === 'perspective'
+          ? 'Auto Perspective: vista libre en perspectiva.'
+          : 'Vista libre ortográfica.',
+        'info'
+      );
+    });
+  } else {
+    setStatus(
+      returnMode === 'perspective'
+        ? 'Vista libre en perspectiva.'
+        : 'Vista libre ortográfica.',
+      'info'
+    );
+  }
 }
 
 function updateNavigationGizmo() {
@@ -1961,6 +2034,10 @@ function clearAll() {
   state.rootGizmoEnabled = false;
   state.rootGizmoDragging = false;
   state.rootGizmoDrag = null;
+  state.axisViewActive = false;
+  state.axisViewQuaternion = null;
+  state.axisAutoSwitchPending = false;
+  state.axisViewReturnMode = 'perspective';
   hideRootGizmo();
 
   resetPlaybackUi();
@@ -2273,8 +2350,16 @@ rootTransformControls.addEventListener('mouseUp', () => {
     ensureActionEdit(record).rootOffset.z + '.', 'ok');
 });
 
+controls.addEventListener('change', handleAxisViewAutoProjection);
+
 els.toggleProjectionBtn.addEventListener('click', () => {
   const next = camera.isPerspectiveCamera ? 'orthographic' : 'perspective';
+
+  state.axisViewActive = false;
+  state.axisViewQuaternion = null;
+  state.axisAutoSwitchPending = false;
+  state.axisViewReturnMode = next;
+
   setActiveCamera(next, { preserveView: true });
   setStatus(
     next === 'orthographic'
@@ -2294,6 +2379,11 @@ els.viewAxisButtons.forEach((button) => {
 els.fitCameraBtn.addEventListener('click', () => {
   const base = getBaseAsset();
   if (!base) return;
+
+  state.axisViewActive = false;
+  state.axisViewQuaternion = null;
+  state.axisAutoSwitchPending = false;
+  state.axisViewReturnMode = 'perspective';
 
   // "Encuadrar" funciona como Home Frame de Blender:
   // vuelve SIEMPRE a la perspectiva original del visor y después encuadra.
