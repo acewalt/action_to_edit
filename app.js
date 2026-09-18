@@ -241,15 +241,53 @@ function defaultActionEdit() {
     trimEnd: 100,
     mirror: false,
     rootOffset: { x: 0, y: 0, z: 0 },
-    rootRotation: { x: 0, y: 0, z: 0 },
+    rootQuaternion: { x: 0, y: 0, z: 0, w: 1 },
   };
+}
+
+function normalizedStoredQuaternion(value) {
+  const q = new THREE.Quaternion(
+    Number(value?.x) || 0,
+    Number(value?.y) || 0,
+    Number(value?.z) || 0,
+    Number.isFinite(Number(value?.w)) ? Number(value.w) : 1
+  );
+  if (q.lengthSq() < 1e-12) q.identity();
+  return q.normalize();
+}
+
+function storeEditQuaternion(edit, quaternion) {
+  const q = quaternion.clone().normalize();
+  edit.rootQuaternion = { x: q.x, y: q.y, z: q.z, w: q.w };
+  return q;
+}
+
+function getEditQuaternion(edit) {
+  return normalizedStoredQuaternion(edit?.rootQuaternion);
 }
 
 function ensureActionEdit(record) {
   if (!record) return defaultActionEdit();
   if (!record.edit) record.edit = defaultActionEdit();
   if (!record.edit.rootOffset) record.edit.rootOffset = { x: 0, y: 0, z: 0 };
-  if (!record.edit.rootRotation) record.edit.rootRotation = { x: 0, y: 0, z: 0 };
+
+  if (!record.edit.rootQuaternion) {
+    const legacyEuler = record.edit.rootRotation || { x: 0, y: 0, z: 0 };
+    const q = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(
+        THREE.MathUtils.degToRad(Number(legacyEuler.x) || 0),
+        THREE.MathUtils.degToRad(Number(legacyEuler.y) || 0),
+        THREE.MathUtils.degToRad(Number(legacyEuler.z) || 0),
+        'XYZ'
+      )
+    ).normalize();
+
+    storeEditQuaternion(record.edit, q);
+    delete record.edit.rootRotation;
+  } else {
+    storeEditQuaternion(record.edit, getEditQuaternion(record.edit));
+  }
+
   return record.edit;
 }
 
@@ -390,19 +428,12 @@ function applyArmSpace(clip, value) {
 function applyActionTransformTracks(clip, record) {
   const edit = ensureActionEdit(record);
   const offset = edit.rootOffset || { x: 0, y: 0, z: 0 };
-  const rotation = edit.rootRotation || { x: 0, y: 0, z: 0 };
-
   const ox = Number(offset.x) || 0;
   const oy = Number(offset.y) || 0;
   const oz = Number(offset.z) || 0;
-  const rx = Number(rotation.x) || 0;
-  const ry = Number(rotation.y) || 0;
-  const rz = Number(rotation.z) || 0;
-
+  const q = getEditQuaternion(edit);
   const duration = Math.max(clip.duration || 0, 1 / 30);
 
-  // This transform is intentionally OUTSIDE the rig. Internal Hips/root/bone
-  // curves are never modified, so walk cycles and root motion remain intact.
   clip.tracks = clip.tracks.filter((track) => {
     try {
       const parsed = THREE.PropertyBinding.parseTrackName(track.name);
@@ -412,28 +443,14 @@ function applyActionTransformTracks(clip, record) {
     }
   });
 
-  const hasPosition =
-    Math.abs(ox) + Math.abs(oy) + Math.abs(oz) > 1e-9;
+  const hasPosition = Math.abs(ox) + Math.abs(oy) + Math.abs(oz) > 1e-9;
+  const hasRotation = q.angleTo(new THREE.Quaternion()) > 1e-8;
 
-  const hasRotation =
-    Math.abs(rx) + Math.abs(ry) + Math.abs(rz) > 1e-9;
-
-  // Always author the transform tracks, even at identity, so every Action
-  // explicitly resets the wrapper when switching clips.
   clip.tracks.push(new THREE.VectorKeyframeTrack(
     ACTION_TRANSFORM_NAME + '.position',
     [0, duration],
     [ox, oy, oz, ox, oy, oz]
   ));
-
-  const q = new THREE.Quaternion().setFromEuler(
-    new THREE.Euler(
-      THREE.MathUtils.degToRad(rx),
-      THREE.MathUtils.degToRad(ry),
-      THREE.MathUtils.degToRad(rz),
-      'XYZ'
-    )
-  ).normalize();
 
   clip.tracks.push(new THREE.QuaternionKeyframeTrack(
     ACTION_TRANSFORM_NAME + '.quaternion',
@@ -441,8 +458,6 @@ function applyActionTransformTracks(clip, record) {
     [q.x, q.y, q.z, q.w, q.x, q.y, q.z, q.w]
   ));
 
-  // Explicit scale identity prevents stale transform values from a previous
-  // clip if the mixer has cached this node.
   clip.tracks.push(new THREE.VectorKeyframeTrack(
     ACTION_TRANSFORM_NAME + '.scale',
     [0, duration],
@@ -957,6 +972,15 @@ function cleanLiveNumber(value, decimals = 3) {
   return Number(n.toFixed(decimals));
 }
 
+function quaternionToDisplayEuler(edit) {
+  const euler = new THREE.Euler().setFromQuaternion(getEditQuaternion(edit), 'XYZ');
+  return {
+    x: THREE.MathUtils.radToDeg(euler.x),
+    y: THREE.MathUtils.radToDeg(euler.y),
+    z: THREE.MathUtils.radToDeg(euler.z),
+  };
+}
+
 function updateRootOffsetFields(edit, { live = false } = {}) {
   if (!edit) return;
 
@@ -967,9 +991,10 @@ function updateRootOffsetFields(edit, { live = false } = {}) {
   els.rootOffsetY.value = String(cleanLiveNumber(edit.rootOffset?.y, posDecimals));
   els.rootOffsetZ.value = String(cleanLiveNumber(edit.rootOffset?.z, posDecimals));
 
-  els.rootRotationX.value = String(cleanLiveNumber(edit.rootRotation?.x, rotDecimals));
-  els.rootRotationY.value = String(cleanLiveNumber(edit.rootRotation?.y, rotDecimals));
-  els.rootRotationZ.value = String(cleanLiveNumber(edit.rootRotation?.z, rotDecimals));
+  const euler = quaternionToDisplayEuler(edit);
+  els.rootRotationX.value = String(cleanLiveNumber(euler.x, rotDecimals));
+  els.rootRotationY.value = String(cleanLiveNumber(euler.y, rotDecimals));
+  els.rootRotationZ.value = String(cleanLiveNumber(euler.z, rotDecimals));
 }
 
 function configureRootCombinedGizmoUi() {
@@ -2514,10 +2539,16 @@ function syncRootRotation() {
   if (!record) return;
 
   const edit = ensureActionEdit(record);
-  edit.rootRotation.x = Number(els.rootRotationX.value) || 0;
-  edit.rootRotation.y = Number(els.rootRotationY.value) || 0;
-  edit.rootRotation.z = Number(els.rootRotationZ.value) || 0;
+  const q = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(
+      THREE.MathUtils.degToRad(Number(els.rootRotationX.value) || 0),
+      THREE.MathUtils.degToRad(Number(els.rootRotationY.value) || 0),
+      THREE.MathUtils.degToRad(Number(els.rootRotationZ.value) || 0),
+      'XYZ'
+    )
+  ).normalize();
 
+  storeEditQuaternion(edit, q);
   refreshActivePreview();
   requestAnimationFrame(updateRootGizmoAttachment);
 }
@@ -2531,7 +2562,7 @@ els.resetRootOffsetBtn.addEventListener('click', () => {
   if (!record) return;
   const edit = ensureActionEdit(record);
   edit.rootOffset = { x: 0, y: 0, z: 0 };
-  edit.rootRotation = { x: 0, y: 0, z: 0 };
+  edit.rootQuaternion = { x: 0, y: 0, z: 0, w: 1 };
   renderMotionPanel();
   refreshActivePreview();
   requestAnimationFrame(updateRootGizmoAttachment);
@@ -2628,11 +2659,7 @@ function beginRootGizmoDrag(mode) {
       Number(edit.rootOffset.y) || 0,
       Number(edit.rootOffset.z) || 0
     ),
-    startRotation: new THREE.Vector3(
-      Number(edit.rootRotation.x) || 0,
-      Number(edit.rootRotation.y) || 0,
-      Number(edit.rootRotation.z) || 0
-    ),
+    startEditQuaternion: getEditQuaternion(edit),
     time: state.currentAction?.time || 0,
     wasPaused: Boolean(state.currentAction?.paused),
   };
@@ -2692,46 +2719,32 @@ function updateRootRotateDrag() {
     drag.mode !== 'rotate' ||
     !record ||
     record.id !== drag.recordId
-  ) {
-    return;
-  }
+  ) return;
 
   const edit = ensureActionEdit(record);
   const currentProxyQuaternion = new THREE.Quaternion();
   rootGizmoProxy.getWorldQuaternion(currentProxyQuaternion);
 
-  // WORLD delta: currentWorld = deltaWorld * startWorld
   const deltaWorld = currentProxyQuaternion
     .clone()
     .multiply(drag.startProxyQuaternion.clone().invert())
     .normalize();
 
-  const deltaEuler = new THREE.Euler().setFromQuaternion(deltaWorld, 'XYZ');
+  const nextEditQuaternion = deltaWorld
+    .clone()
+    .multiply(drag.startEditQuaternion)
+    .normalize();
 
-  edit.rootRotation.x =
-    drag.startRotation.x + THREE.MathUtils.radToDeg(deltaEuler.x);
-  edit.rootRotation.y =
-    drag.startRotation.y + THREE.MathUtils.radToDeg(deltaEuler.y);
-  edit.rootRotation.z =
-    drag.startRotation.z + THREE.MathUtils.radToDeg(deltaEuler.z);
-
+  storeEditQuaternion(edit, nextEditQuaternion);
   updateRootOffsetFields(edit, { live: true });
 
-  // Convert that global/world delta into the animated bone's local parent
-  // space so the live preview matches what gets written to the Action.
-  const parentWorld = drag.parentWorldQuaternion;
-  const localDelta = parentWorld
+  const localQuaternion = drag.parentWorldQuaternion
     .clone()
     .invert()
-    .multiply(deltaWorld)
-    .multiply(parentWorld)
+    .multiply(nextEditQuaternion)
     .normalize();
 
-  drag.target.quaternion
-    .copy(drag.startTargetQuaternion)
-    .premultiply(localDelta)
-    .normalize();
-
+  drag.target.quaternion.copy(localQuaternion);
   drag.target.updateMatrixWorld(true);
 }
 
@@ -2749,10 +2762,31 @@ function finishRootGizmoDrag(mode) {
     const edit = ensureActionEdit(record);
 
     if (mode === 'rotate') {
-      const snap = Math.max(Number(state.rootRotateSnap) || 5, 0.0001);
-      edit.rootRotation.x = roundOffsetValue(edit.rootRotation.x, snap);
-      edit.rootRotation.y = roundOffsetValue(edit.rootRotation.y, snap);
-      edit.rootRotation.z = roundOffsetValue(edit.rootRotation.z, snap);
+      const snapRad = THREE.MathUtils.degToRad(
+        Math.max(Number(state.rootRotateSnap) || 5, 0.0001)
+      );
+
+      const current = getEditQuaternion(edit);
+      const delta = current
+        .clone()
+        .multiply(drag.startEditQuaternion.clone().invert())
+        .normalize();
+
+      let angle = 2 * Math.acos(THREE.MathUtils.clamp(delta.w, -1, 1));
+      if (angle > Math.PI) angle -= Math.PI * 2;
+
+      const sinHalf = Math.sqrt(Math.max(1 - delta.w * delta.w, 0));
+      const axis = sinHalf < 1e-7
+        ? new THREE.Vector3(1, 0, 0)
+        : new THREE.Vector3(delta.x / sinHalf, delta.y / sinHalf, delta.z / sinHalf).normalize();
+
+      const snappedAngle = Math.round(angle / snapRad) * snapRad;
+      const snappedDelta = new THREE.Quaternion().setFromAxisAngle(axis, snappedAngle);
+
+      storeEditQuaternion(
+        edit,
+        snappedDelta.multiply(drag.startEditQuaternion).normalize()
+      );
     } else {
       const snap = Math.max(Number(state.rootMoveSnap) || 0.5, 0.000001);
       edit.rootOffset.x = roundOffsetValue(edit.rootOffset.x, snap);
@@ -2778,9 +2812,17 @@ function finishRootGizmoDrag(mode) {
   const savedEdit = ensureActionEdit(record);
 
   if (mode === 'rotate') {
+    const display = quaternionToDisplayEuler(savedEdit);
+    const q = getEditQuaternion(savedEdit);
     setStatus(
-      'Rotación global guardada: X ' + savedEdit.rootRotation.x + '° · Y ' +
-      savedEdit.rootRotation.y + '° · Z ' + savedEdit.rootRotation.z + '°.',
+      'Quaternion guardado · Euler aprox. X ' +
+      cleanLiveNumber(display.x, 1) + '° · Y ' +
+      cleanLiveNumber(display.y, 1) + '° · Z ' +
+      cleanLiveNumber(display.z, 1) + '° · q(' +
+      cleanLiveNumber(q.x, 3) + ', ' +
+      cleanLiveNumber(q.y, 3) + ', ' +
+      cleanLiveNumber(q.z, 3) + ', ' +
+      cleanLiveNumber(q.w, 3) + ').',
       'ok'
     );
   } else {
