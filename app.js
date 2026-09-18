@@ -693,11 +693,97 @@ function parentBone(node) {
   return current?.isBone ? current : null;
 }
 
-function getTwoBoneChain(root, endBoneName) {
+function boneAncestors(node, limit = 10) {
+  const result = [];
+  let current = parentBone(node);
+
+  while (current && result.length < limit) {
+    result.push(current);
+    current = parentBone(current);
+  }
+
+  return result;
+}
+
+function normalizeRigBoneName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/mixamorig\d*[:_]?/g, '')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function chainRoleScore(name, key, role) {
+  const n = normalizeRigBoneName(name);
+  const hand = key?.endsWith('Hand');
+
+  let score = 0;
+
+  // Avoid helper/control/twist bones when a deform chain is available.
+  if (/mch|org|ctrl|control|ik|pole|target/.test(n)) score -= 120;
+  if (/twist|roll|tweak/.test(n)) score -= 55;
+  if (/def/.test(String(name || '').toLowerCase())) score += 12;
+
+  if (hand && role === 'mid') {
+    if (/forearm|lowerarm|lowerarm/.test(n)) score += 150;
+    if (/elbow/.test(n)) score += 90;
+    if (/arm/.test(n)) score += 20;
+    if (/upperarm|shoulder|hand|wrist/.test(n)) score -= 100;
+  }
+
+  if (hand && role === 'upper') {
+    if (/upperarm/.test(n)) score += 160;
+    if (/shoulder/.test(n)) score += 65;
+    if (/arm/.test(n)) score += 45;
+    if (/forearm|lowerarm|elbow|hand|wrist/.test(n)) score -= 120;
+  }
+
+  if (!hand && role === 'mid') {
+    if (/lowerleg|calf|shin/.test(n)) score += 160;
+    if (/knee/.test(n)) score += 80;
+    if (/leg/.test(n)) score += 25;
+    if (/upperleg|thigh|foot|ankle/.test(n)) score -= 110;
+  }
+
+  if (!hand && role === 'upper') {
+    if (/upperleg|thigh/.test(n)) score += 170;
+    if (/leg/.test(n)) score += 35;
+    if (/lowerleg|calf|shin|knee|foot|ankle/.test(n)) score -= 120;
+  }
+
+  return score;
+}
+
+function bestAncestorForRole(ancestors, key, role) {
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (const bone of ancestors) {
+    const score = chainRoleScore(bone.name, key, role);
+    if (score > bestScore) {
+      best = bone;
+      bestScore = score;
+    }
+  }
+
+  return bestScore >= 25 ? best : null;
+}
+
+function getTwoBoneChain(root, endBoneName, key = '') {
   const end = findBoneByName(root, endBoneName);
-  const mid = parentBone(end);
-  const upper = parentBone(mid);
-  if (!upper || !mid || !end) return null;
+  if (!end) return null;
+
+  const ancestors = boneAncestors(end, 12);
+
+  let mid = bestAncestorForRole(ancestors, key, 'mid');
+  if (!mid) mid = ancestors[0] || null;
+  if (!mid) return null;
+
+  const aboveMid = boneAncestors(mid, 12);
+  let upper = bestAncestorForRole(aboveMid, key, 'upper');
+  if (!upper) upper = aboveMid[0] || null;
+
+  if (!upper || upper === mid || mid === end) return null;
+
   return { upper, mid, end };
 }
 
@@ -913,7 +999,7 @@ function applySingleLimbIKOffset(clip, edit, baseAsset, key) {
   const sampleRoot = SkeletonUtils.clone(baseAsset.object);
   applyRestPose(sampleRoot, baseAsset.restPose);
 
-  const chain = getTwoBoneChain(sampleRoot, boneName);
+  const chain = getTwoBoneChain(sampleRoot, boneName, key);
   if (!chain) {
     console.warn('No se pudo construir cadena IK de 2 huesos para', boneName);
     return false;
@@ -1685,8 +1771,10 @@ function updateRootGizmoAttachment() {
 
   rootTransformControls.enabled = true;
   rootRotateControls.enabled = true;
-  rootTransformControls.getHelper().visible = true;
-  rootRotateControls.getHelper().visible = true;
+
+  const showRootHelpers = !state.limbGizmoEnabled;
+  rootTransformControls.getHelper().visible = showRootHelpers;
+  rootRotateControls.getHelper().visible = showRootHelpers;
 }
 
 function updateRootGizmoPosition() {
@@ -1744,8 +1832,18 @@ function renderLimbEditor(edit, base) {
       ? limb.bone
       : 'auto';
 
+  const chain = resolved
+    ? getTwoBoneChain(base?.object, resolved, key)
+    : null;
+
   els.limbDetectedLabel.textContent = resolved
-    ? (limb.bone === 'auto' ? 'Auto → ' + resolved : 'Manual → ' + resolved)
+    ? (
+        (limb.bone === 'auto' ? 'Auto → ' : 'Manual → ') +
+        resolved +
+        (chain
+          ? ' · IK ' + chain.upper.name + ' → ' + chain.mid.name + ' → ' + chain.end.name
+          : ' · sin cadena IK válida')
+      )
     : 'No detectado · selecciona manualmente';
 
   els.limbAllowStretch.checked = Boolean(limb.allowStretch);
@@ -1761,8 +1859,8 @@ function renderLimbEditor(edit, base) {
 
   els.toggleLimbGizmoBtn.classList.toggle('active', state.limbGizmoEnabled);
   els.toggleLimbGizmoBtn.textContent = state.limbGizmoEnabled
-    ? 'Gizmo IK activo'
-    : 'Editar extremidad en viewport';
+    ? 'Gizmo IK activo · ocultar'
+    : 'Gizmo IK en viewport';
 
   requestAnimationFrame(updateLimbGizmoAttachment);
 }
@@ -1789,6 +1887,11 @@ function hideLimbGizmo() {
   limbTransformControls.getHelper().visible = false;
   limbRotateControls.getHelper().visible = false;
   els.toggleLimbGizmoBtn?.classList.remove('active');
+
+  if (state.rootGizmoEnabled) {
+    rootTransformControls.getHelper().visible = true;
+    rootRotateControls.getHelper().visible = true;
+  }
 }
 
 function updateLimbGizmoAttachment() {
@@ -1803,8 +1906,19 @@ function updateLimbGizmoAttachment() {
 
   if (!valid) {
     hideLimbGizmo();
+
+    // Restore the Action Transform helper when leaving limb editing.
+    if (state.rootGizmoEnabled) {
+      rootTransformControls.getHelper().visible = true;
+      rootRotateControls.getHelper().visible = true;
+    }
     return;
   }
+
+  // Do not show two large combined gizmos at once. The selected limb gizmo
+  // takes visual priority while IK editing is active.
+  rootTransformControls.getHelper().visible = false;
+  rootRotateControls.getHelper().visible = false;
 
   data.bone.updateWorldMatrix(true, false);
   data.bone.getWorldPosition(limbGizmoProxy.position);
@@ -1939,7 +2053,13 @@ function selectActionForEditing(recordId, { openPanel = true } = {}) {
   const record = state.clips.find((item) => item.id === recordId);
   if (!record) return;
 
+  const changedAction = state.activeClipId !== record.id;
   state.activeClipId = record.id;
+
+  if (changedAction) {
+    state.limbGizmoEnabled = true;
+  }
+
   if (openPanel) state.motionPanelOpen = true;
   renderMotionPanel();
   renderActions();
@@ -2387,7 +2507,13 @@ function playClip(clipId, options = {}) {
   action.paused = false;
   action.play();
 
+  const changedAction = state.activeClipId !== record.id;
   state.activeClipId = record.id;
+
+  if (changedAction) {
+    state.limbGizmoEnabled = true;
+  }
+
   state.currentAction = action;
   state.previewClip = clip;
 
@@ -2410,6 +2536,7 @@ function playClip(clipId, options = {}) {
   renderActions();
   renderMotionPanel();
   requestAnimationFrame(updateRootGizmoAttachment);
+  requestAnimationFrame(updateLimbGizmoAttachment);
 
   const compat = compatibility(record, base);
   if (options.silent) return;
@@ -3340,6 +3467,8 @@ els.mirrorActionCheckbox.addEventListener('change', () => {
 
 els.limbSlotSelect.addEventListener('change', () => {
   state.activeLimbKey = els.limbSlotSelect.value;
+  state.limbGizmoEnabled = true;
+
   const record = getActiveRecord();
   const base = getBaseAsset();
   if (record && base) {
@@ -3354,6 +3483,7 @@ els.limbBoneSelect.addEventListener('change', () => {
   if (!record || !base) return;
   const edit = ensureActionEdit(record);
   ensureLimbOffsets(edit)[state.activeLimbKey].bone = els.limbBoneSelect.value;
+  state.limbGizmoEnabled = true;
   renderLimbEditor(edit, base);
   refreshActivePreview();
   requestAnimationFrame(updateLimbGizmoAttachment);
@@ -3437,7 +3567,7 @@ function beginLimbGizmoDrag(mode) {
   const data = getActiveLimbData();
   if (!data?.bone) return;
 
-  const chain = getTwoBoneChain(data.base.object, data.boneName);
+  const chain = getTwoBoneChain(data.base.object, data.boneName, data.key);
   if (!chain) {
     setStatus('El hueso seleccionado no tiene una cadena padre de 2 huesos compatible con IK.', 'warn');
     return;
