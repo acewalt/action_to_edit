@@ -6049,7 +6049,7 @@ els.retargetAutoBakeIk.addEventListener('change', () => {
   if (els.retargetAutoBakeIk.checked) {
     setRetargetProgress(
       0,
-      'Nota: el FK→IK exacto de Rigify/ARP/CloudRig depende de constraints/drivers de Blender. El mapping se conserva, pero el bake web actual genera FK.'
+      'FK→IK web activo: primero se hornea FK/deform sobre el Target y después se generan los 4 end-effectors/poles usando la geometría ya retargeteada, siguiendo el orden de BlendCap.'
     );
   }
 });
