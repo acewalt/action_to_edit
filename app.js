@@ -15,6 +15,8 @@ const els = {
   actionList: $('#actionList'),
   actionCount: $('#actionCount'),
   actionSearch: $('#actionSearch'),
+  selectAllActionsBtn: $('#selectAllActionsBtn'),
+  deselectEmptyActionsBtn: $('#deselectEmptyActionsBtn'),
   viewport: $('#viewport'),
   viewportEmpty: $('#viewportEmpty'),
   baseBadge: $('#baseBadge'),
@@ -276,10 +278,12 @@ function renderAssets() {
 function renderActions() {
   const query = els.actionSearch.value.trim().toLowerCase();
   const base = getBaseAsset();
-  const visible = state.clips.filter((record) => {
-    if (!query) return true;
-    return record.name.toLowerCase().includes(query) || record.sourceFile.toLowerCase().includes(query);
-  });
+  const visible = state.clips
+    .filter((record) => {
+      if (!query) return true;
+      return record.name.toLowerCase().includes(query) || record.sourceFile.toLowerCase().includes(query);
+    })
+    .sort((a, b) => Number(Boolean(a.empty)) - Number(Boolean(b.empty)));
 
   els.actionCount.textContent = String(state.clips.length);
   els.actionList.innerHTML = '';
@@ -819,6 +823,29 @@ els.dropZone.addEventListener('drop', (event) => importFiles(event.dataTransfer.
 
 els.clearAllBtn.addEventListener('click', clearAll);
 els.actionSearch.addEventListener('input', renderActions);
+
+els.selectAllActionsBtn.addEventListener('click', () => {
+  state.clips.forEach((record) => { record.include = true; });
+  renderActions();
+  setStatus('Todas las actions quedaron seleccionadas para exportar.', 'ok');
+});
+
+els.deselectEmptyActionsBtn.addEventListener('click', () => {
+  let changed = 0;
+  state.clips.forEach((record) => {
+    if (record.empty && record.include) {
+      record.include = false;
+      changed += 1;
+    }
+  });
+  renderActions();
+  setStatus(
+    changed
+      ? 'Se desmarcaron ' + changed + ' action' + (changed === 1 ? '' : 's') + ' sin tracks.'
+      : 'No había actions sin tracks seleccionadas.',
+    changed ? 'ok' : 'info'
+  );
+});
 els.fitCameraBtn.addEventListener('click', () => {
   const base = getBaseAsset();
   if (base) {
