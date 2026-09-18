@@ -515,35 +515,13 @@ export async function buildRetargetClip({
         skipped: [],
       };
 
-  // FBX files do not always share the same raw up/front convention.
-  // The Rest Pose viewport already normalizes both rigs visually; the bake
-  // must use the same canonical humanoid frame or a matched T-pose can still
-  // retarget 90 degrees onto its back.
-  const sourceHumanoidFrame =
-    computeHumanoidFrameFromPose(sourceRest);
-  const targetHumanoidFrame =
-    computeHumanoidFrameFromPose(targetRest);
-
-  const sourceToCanonicalQ =
-    sourceHumanoidFrame.basis.clone().invert();
-  const canonicalToTargetQ =
-    targetHumanoidFrame.basis.clone();
-
-  const sourceToTargetQ =
-    canonicalToTargetQ
-      .clone()
-      .multiply(sourceToCanonicalQ)
-      .normalize();
-
   const sourceHeight = computeRigHeightFromPose(
     sourceRest,
-    new Set(runtimePairs.map((pair) => pair.sourceName)),
-    sourceToCanonicalQ
+    new Set(runtimePairs.map((pair) => pair.sourceName))
   );
   const targetHeight = computeRigHeightFromPose(
     targetRest,
-    new Set(runtimePairs.map((pair) => pair.targetName)),
-    targetHumanoidFrame.basis.clone().invert()
+    new Set(runtimePairs.map((pair) => pair.targetName))
   );
   const scaleRatio =
     autoScale && sourceHeight > 1e-8 && targetHeight > 1e-8
@@ -647,15 +625,13 @@ export async function buildRetargetClip({
             deltaAdjusted = identity.clone().slerp(deltaAdjusted, pair.influence).normalize();
           }
 
-          // Convert source world delta through the canonical humanoid
-          // frame before applying it to the target raw FBX frame.
-          const targetDelta = sourceToTargetQ
+          // BlendCap exact world-delta transfer:
+          // S_pose * inverse(S_rest) * T_rest.
+          // FBXLoader has already converted both files into Three.js world
+          // coordinates, so an extra humanoid-frame conjugation would apply
+          // the axis correction twice.
+          desiredWorldQuaternion = deltaAdjusted
             .clone()
-            .multiply(deltaAdjusted)
-            .multiply(sourceToTargetQ.clone().invert())
-            .normalize();
-
-          desiredWorldQuaternion = targetDelta
             .multiply(targetRestEntry.worldQuaternion)
             .normalize();
         }
@@ -759,42 +735,26 @@ export async function buildRetargetClip({
                 .multiplyScalar(scaleRatio * pairScale);
             }
 
-            // BlendCap axis masks are world-space components. Filter in
-            // canonical humanoid space, then convert to target raw FBX world.
-            const canonicalContribution =
-              worldContribution
-                .clone()
-                .applyQuaternion(sourceToCanonicalQ);
-
-            applyAxesMask(
-              canonicalContribution,
-              axes
-            );
+            applyAxesMask(worldContribution, axes);
 
             if (pair.influence < 0.999999) {
-              canonicalContribution.multiplyScalar(
-                pair.influence
-              );
+              worldContribution.multiplyScalar(pair.influence);
             }
 
             if (!worldLocationAccum) {
-              worldLocationAccum =
-                new THREE.Vector3();
+              worldLocationAccum = new THREE.Vector3();
             }
 
             if (axes.includes('X')) {
-              worldLocationAccum.x =
-                canonicalContribution.x;
+              worldLocationAccum.x = worldContribution.x;
               wroteWorldLocation = true;
             }
             if (axes.includes('Y')) {
-              worldLocationAccum.y =
-                canonicalContribution.y;
+              worldLocationAccum.y = worldContribution.y;
               wroteWorldLocation = true;
             }
             if (axes.includes('Z')) {
-              worldLocationAccum.z =
-                canonicalContribution.z;
+              worldLocationAccum.z = worldContribution.z;
               wroteWorldLocation = true;
             }
           }
@@ -810,13 +770,9 @@ export async function buildRetargetClip({
             )
             .invert();
 
-        const targetWorldDelta =
+        const localDelta =
           worldLocationAccum
             .clone()
-            .applyQuaternion(canonicalToTargetQ);
-
-        const localDelta =
-          targetWorldDelta
             .applyMatrix3(parentLinearInv);
 
         nextLocalPosition =
@@ -993,16 +949,6 @@ export async function buildRetargetClip({
       invalidPairs: invalid,
       sampleCount: sampleTimes.length,
       scaleRatio,
-      humanoidFrameCorrectionDegrees:
-        THREE.MathUtils.radToDeg(
-          2 * Math.acos(
-            clamp(
-              Math.abs(sourceToTargetQ.w),
-              -1,
-              1
-            )
-          )
-        ),
       sourceHead: resolvedHeadSource,
       targetHead: resolvedHeadTarget,
       mappedBones: targetOrder,
@@ -1837,6 +1783,18 @@ function countWeightedDescendants(bone, weightedTargetBones) {
 }
 
 
+function isBlenderControlBoneName(name) {
+  const raw = String(name || '').toLowerCase();
+
+  // Keep plain "root" / "master" as structural carriers. Prefix families
+  // below are control-rig conventions from CloudRig/Rigify/ARP exports.
+  return (
+    /^(fk|ik|mch|org|ctrl|str|p-str|hng|snap|line|dsp|scale)[-_:]/.test(raw) ||
+    /^(hip|torso)[-_:]/.test(raw) ||
+    /(^|[-_:])(pole|target|control)([-_:]|$)/.test(raw)
+  );
+}
+
 function resolveBrowserBakeTarget({
   requestedName,
   pair,
@@ -1852,16 +1810,23 @@ function resolveBrowserBakeTarget({
     return requestedName;
   }
 
-  // Keep real deform bones AND non-weighted hierarchy carriers such as
-  // exported root/pelvis bones. They affect weighted descendants directly in
-  // FBX and do not need Blender constraints to work.
-  if (influentialTargetBones?.has(requestedName)) {
-    return requestedName;
-  }
-
   const requestedBone = targetBones.get(requestedName);
   const requestedCompact =
     normalizeExactBoneName(requestedName);
+
+  const controlLike =
+    isBlenderControlBoneName(requestedName);
+
+  // Real deform bones and structural FBX carriers can be keyed directly.
+  // Blender-style controls (FK-/IK-/HIP-/TORSO-/STR-/P-/HNG...) must be
+  // redirected even when they appear in the exported hierarchy, because their
+  // constraint graph is not evaluated by Three.js.
+  if (
+    influentialTargetBones?.has(requestedName) &&
+    !controlLike
+  ) {
+    return requestedName;
+  }
 
   let wantedSemantic = semanticBoneKey(requestedName);
 
@@ -1876,11 +1841,16 @@ function resolveBrowserBakeTarget({
     wantedSemantic = 'hips';
   }
 
-  // Locomotion rows should move the deform pelvis/root, not an FK helper.
+  // BlendCap's CloudRig locomotion split is intentional:
+  //   Hips -> root        LOC XY  = global ground travel
+  //   Hips -> TORSO-Spine LOC Z   = pelvis/torso height
+  //   Hips -> HIP-Spine   ROT     = pelvis orientation
+  //
+  // In Blender the controls drive deform bones through constraints. In the
+  // browser we reproduce the RESULT directly on the deform hierarchy.
   if (
     hasLocationChannel(pair.channels) &&
-    (wantedSemantic === 'root' ||
-      wantedSemantic === 'hips')
+    wantedSemantic === 'root'
   ) {
     const motionRoot =
       findTargetMotionCarrier(
@@ -1924,19 +1894,23 @@ function resolveBrowserBakeTarget({
     let score = 0;
     const lower = name.toLowerCase();
 
-    if (/^def[-_:]?/.test(lower)) score += 100;
-    if (/deform/.test(lower)) score += 70;
-    if (/^fk[-_:]?/.test(lower)) score -= 40;
+    if (/^def[-_:]?/.test(lower)) score += 240;
+    if (/deform/.test(lower)) score += 120;
+    if (/pelvis|hips/.test(lower) && wantedSemantic === 'hips') score += 220;
+
+    if (isBlenderControlBoneName(name)) score -= 500;
+    if (/^fk[-_:]?/.test(lower)) score -= 160;
+
     if (
       /(mch|org|ctrl|control|pole|target|ik[-_:]|hng|hanger|twist|tweak|roll)/
         .test(lower)
     ) {
-      score -= 100;
+      score -= 220;
     }
 
-    // Same anatomical role wins; rest-position proximity separates multiple
-    // spine levels without hard-coding a specific CloudRig skeleton.
-    if (semantic === wantedSemantic) score += 80;
+    // Same anatomical role wins. Rest-position proximity separates multiple
+    // spine levels while preserving custom rig naming.
+    if (semantic === wantedSemantic) score += 180;
     score -= requestedPos.distanceTo(pos);
 
     candidates.push({ name, score });
@@ -2011,153 +1985,15 @@ function blenderAxesToThreeWorld(value) {
   return normalizeAxes(out);
 }
 
-function computeHumanoidFrameFromPose(pose) {
-  const entries = [...(pose?.entries?.() || [])];
-
-  const bestEntry = (semantic) => {
-    let best = null;
-    let bestScore = -Infinity;
-
-    for (const [name, entry] of entries) {
-      if (semanticBoneKey(name) !== semantic) continue;
-
-      const n = String(name || '').toLowerCase();
-      let score = 0;
-
-      if (/^mixamorig/.test(n)) score += 100;
-      if (/^def[-_:]/.test(n)) score += 90;
-      if (/^fk[-_:]/.test(n)) score += 80;
-
-      if (/(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|ik-|hng|p-str|str-|twist|tweak|roll)/i.test(n)) {
-        score -= 100;
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        best = entry;
-      }
-    }
-
-    return best;
-  };
-
-  const hips =
-    bestEntry('hips') ||
-    bestEntry('spine');
-
-  const head =
-    bestEntry('head') ||
-    bestEntry('neck');
-
-  if (!hips || !head) {
-    return {
-      basis: new THREE.Quaternion(),
-      up: new THREE.Vector3(0, 1, 0),
-      right: new THREE.Vector3(1, 0, 0),
-      forward: new THREE.Vector3(0, 0, 1),
-    };
-  }
-
-  const up =
-    head.worldPosition
-      .clone()
-      .sub(hips.worldPosition);
-
-  if (up.lengthSq() < 1e-10) {
-    up.set(0, 1, 0);
-  } else {
-    up.normalize();
-  }
-
-  const left =
-    bestEntry('leftshoulder') ||
-    bestEntry('leftthigh');
-
-  const right =
-    bestEntry('rightshoulder') ||
-    bestEntry('rightthigh');
-
-  const rightAxis =
-    new THREE.Vector3(1, 0, 0);
-
-  if (left && right) {
-    rightAxis
-      .copy(right.worldPosition)
-      .sub(left.worldPosition);
-  }
-
-  rightAxis.addScaledVector(
-    up,
-    -rightAxis.dot(up)
-  );
-
-  if (rightAxis.lengthSq() < 1e-10) {
-    rightAxis.set(1, 0, 0);
-  } else {
-    rightAxis.normalize();
-  }
-
-  const forward =
-    new THREE.Vector3()
-      .crossVectors(rightAxis, up);
-
-  if (forward.lengthSq() < 1e-10) {
-    forward.set(0, 0, 1);
-  } else {
-    forward.normalize();
-  }
-
-  rightAxis
-    .crossVectors(up, forward)
-    .normalize();
-
-  const basisMatrix =
-    new THREE.Matrix4().makeBasis(
-      rightAxis,
-      up,
-      forward
-    );
-
-  const basis =
-    new THREE.Quaternion()
-      .setFromRotationMatrix(basisMatrix)
-      .normalize();
-
-  return {
-    basis,
-    up,
-    right: rightAxis,
-    forward,
-  };
-}
-
-function computeRigHeightFromPose(
-  pose,
-  includedNames = null,
-  worldToCanonical = null
-) {
+function computeRigHeightFromPose(pose, includedNames = null) {
   let minY = Infinity;
   let maxY = -Infinity;
 
   for (const [name, entry] of pose) {
-    if (
-      includedNames &&
-      !includedNames.has(name)
-    ) {
-      continue;
-    }
+    if (includedNames && !includedNames.has(name)) continue;
 
-    const p =
-      entry.worldPosition.clone();
-
-    if (worldToCanonical) {
-      p.applyQuaternion(
-        worldToCanonical
-      );
-    }
-
-    minY = Math.min(minY, p.y);
-    maxY = Math.max(maxY, p.y);
+    minY = Math.min(minY, entry.worldPosition.y);
+    maxY = Math.max(maxY, entry.worldPosition.y);
   }
 
   const height = maxY - minY;
