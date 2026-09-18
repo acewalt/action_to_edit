@@ -17,8 +17,8 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-47';
-import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-47';
+} from './retargeting.js?v=20260918-48';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-48';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -160,6 +160,8 @@ const els = {
   retargetHeadSource: $('#retargetHeadSource'),
   retargetHeadTarget: $('#retargetHeadTarget'),
   retargetIkChains: $('#retargetIkChains'),
+  retargetEnableFkIkMapping: $('#retargetEnableFkIkMapping'),
+  retargetFkDiagnostic: $('#retargetFkDiagnostic'),
   retargetCustomIkEnabled: $('#retargetCustomIkEnabled'),
   retargetCustomIkFields: $('#retargetCustomIkFields'),
   retargetProgressBar: $('#retargetProgressBar'),
@@ -5003,6 +5005,7 @@ function refreshRetargetBoneLists() {
   renderRetargetPairs();
   renderRetargetIkChains();
   renderRetargetCustomIkSources();
+  updateRetargetFkIkUi();
 }
 
 function retargetPairValidity(pair) {
@@ -5420,6 +5423,94 @@ function renderRetargetIkChains() {
     wrap.append(label, ik, pole);
     els.retargetIkChains.appendChild(wrap);
   });
+
+  updateRetargetFkIkUi();
+}
+
+function updateRetargetFkIkUi() {
+  const enabled = Boolean(els.retargetEnableFkIkMapping?.checked);
+
+  // FK→IK mapping is a second stage. Keep it completely out of the bake when
+  // disabled so we can inspect pure FK targeting first.
+  if (els.retargetAutoBakeIk) {
+    els.retargetAutoBakeIk.disabled = !enabled;
+    if (!enabled) els.retargetAutoBakeIk.checked = false;
+  }
+
+  const target = retargetTargetAsset();
+  const targetNames = new Set(retargetBoneNames(target));
+  const targetPrefix = els.retargetTargetPrefix.value.trim();
+
+  let total = 0;
+  let present = 0;
+  let ikPresent = 0;
+  let polePresent = 0;
+
+  for (const row of state.retargetIkChains || []) {
+    const ik = String(row.ik_control || '').trim();
+    const pole = String(row.pole_control || '').trim();
+
+    if (ik) {
+      total += 1;
+      const resolved =
+        resolveRetargetBoneName(
+          ik,
+          [...targetNames],
+          targetPrefix
+        );
+      if (resolved) {
+        present += 1;
+        ikPresent += 1;
+      }
+    }
+
+    if (pole) {
+      total += 1;
+      const resolved =
+        resolveRetargetBoneName(
+          pole,
+          [...targetNames],
+          targetPrefix
+        );
+      if (resolved) {
+        present += 1;
+        polePresent += 1;
+      }
+    }
+  }
+
+  const fkPairs = (state.retargetPairs || []).filter((pair) =>
+    /^fk[-_:]/i.test(String(pair.target || '').trim())
+  );
+
+  let fkValid = 0;
+  for (const pair of fkPairs) {
+    const resolved =
+      resolveRetargetBoneName(
+        pair.target,
+        [...targetNames],
+        targetPrefix
+      );
+    if (resolved) fkValid += 1;
+  }
+
+  if (els.retargetFkDiagnostic) {
+    const mode = enabled ? 'FK→IK habilitado' : 'FK puro';
+    const chainText = total
+      ? ' · IK/Pole ' + present + '/' + total +
+        ' (IK ' + ikPresent + ', Pole ' + polePresent + ')'
+      : '';
+
+    els.retargetFkDiagnostic.textContent =
+      mode +
+      ' · FK del preset ' +
+      fkValid +
+      '/' +
+      fkPairs.length +
+      chainText;
+  }
+
+  els.retargetIkChains?.classList.toggle('is-disabled', !enabled);
 }
 
 function renderRetargetCustomIkSources() {
@@ -5676,9 +5767,15 @@ async function applyCurrentRetargeting() {
       headSource: els.retargetHeadSource.value.trim(),
       headTarget: els.retargetHeadTarget.value.trim(),
       clipName: outputName,
-      autoBakeIk: els.retargetAutoBakeIk.checked,
-      ikChains: state.retargetIkChains.map((row) => ({ ...row })),
-      customIkSources: { ...state.retargetCustomIkSources },
+      autoBakeIk:
+        els.retargetEnableFkIkMapping.checked &&
+        els.retargetAutoBakeIk.checked,
+      ikChains: els.retargetEnableFkIkMapping.checked
+        ? state.retargetIkChains.map((row) => ({ ...row }))
+        : [],
+      customIkSources: els.retargetEnableFkIkMapping.checked
+        ? { ...state.retargetCustomIkSources }
+        : { enabled: false },
       onProgress: (progress, frame, total) => {
         setRetargetProgress(
           progress,
@@ -5732,8 +5829,12 @@ async function applyCurrentRetargeting() {
           result.report.influentialTargetBoneCount || 0,
         restBaselineBoneCount:
           result.report.restBaselineBoneCount || 0,
+        fkIkMappingEnabled:
+          els.retargetEnableFkIkMapping.checked,
         ikBakedChains: result.report.ikBakedChains || 0,
         ikSkippedChains: result.report.ikSkippedChains || [],
+        fkRequestedPairs: result.report.fkRequestedPairs || 0,
+        fkResolvedPairs: result.report.fkResolvedPairs || 0,
       },
     };
 
@@ -5774,9 +5875,15 @@ async function applyCurrentRetargeting() {
 
     playClip(newRecord.id, { silent: true });
 
-    const ikNote = els.retargetAutoBakeIk.checked
-      ? ' · FK→IK de control-rig no se hornea en navegador; el mapping IK queda conservado en el preset.'
-      : '';
+    const fkOnlyMode =
+      !els.retargetEnableFkIkMapping.checked;
+
+    const fkNote =
+      ' · FK ' +
+      (result.report.fkResolvedPairs || 0) +
+      '/' +
+      (result.report.fkRequestedPairs || 0) +
+      (fkOnlyMode ? ' · modo FK puro' : '');
 
     const redirectedCount =
       result.report.redirectedPairs?.length || 0;
@@ -5795,9 +5902,11 @@ async function applyCurrentRetargeting() {
     const ikBakedChains =
       result.report.ikBakedChains || 0;
 
-    const ikNote2 = els.retargetAutoBakeIk.checked
-      ? ' · FK→IK ' + ikBakedChains + '/4 cadenas'
-      : '';
+    const ikNote2 =
+      els.retargetEnableFkIkMapping.checked &&
+      els.retargetAutoBakeIk.checked
+        ? ' · FK→IK ' + ikBakedChains + '/4 cadenas'
+        : '';
 
     setRetargetProgress(
       1,
@@ -5808,10 +5917,10 @@ async function applyCurrentRetargeting() {
         ' pares · ' +
         result.report.sampleCount +
         ' samples' +
+        fkNote +
         deformNote +
         baselineNote +
-        ikNote2 +
-        ikNote
+        ikNote2
     );
 
     setStatus(
@@ -5896,6 +6005,7 @@ els.retargetSourcePrefix.addEventListener('input', () => {
 els.retargetTargetPrefix.addEventListener('input', () => {
   markRetargetPresetDirty();
   renderRetargetPairs();
+  updateRetargetFkIkUi();
 });
 els.retargetDetectPrefixesBtn.addEventListener('click', detectCurrentRetargetPrefixes);
 
@@ -6052,6 +6162,16 @@ els.retargetAutoBakeIk.addEventListener('change', () => {
       'FK→IK web activo: primero se hornea FK/deform sobre el Target y después se generan los 4 end-effectors/poles usando la geometría ya retargeteada, siguiendo el orden de BlendCap.'
     );
   }
+});
+
+els.retargetEnableFkIkMapping.addEventListener('change', () => {
+  updateRetargetFkIkUi();
+  setRetargetProgress(
+    0,
+    els.retargetEnableFkIkMapping.checked
+      ? 'FK→IK Mapping habilitado. El bake IK solo se ejecuta si activas “Auto-bake IK on Apply”.'
+      : 'Modo FK puro: FK→IK Mapping completamente fuera del retarget.'
+  );
 });
 
 els.retargetCustomIkEnabled.addEventListener('change', () => {
