@@ -253,13 +253,32 @@ export function autoMatchPairs(sourceNames, targetNames, sourcePrefix = '', targ
   const targetByExact = new Map();
   const targetBySemantic = new Map();
 
+  const targetScore = (name) => {
+    const n = String(name || '').toLowerCase();
+    let score = 0;
+    if (/^fk[-_]/.test(n)) score += 80;
+    if (/^def[-_]/.test(n)) score += 70;
+    if (/^str[-_]/.test(n)) score += 20;
+    if (/^p-str[-_]/.test(n)) score -= 10;
+    if (/fk-hng|hng|hanger/.test(n)) score -= 45;
+    if (/ik-|pole|target|line-|dsp-|snap-|scale-|root-/.test(n)) score -= 55;
+    if (/twist|tweak|roll/.test(n)) score -= 25;
+    return score;
+  };
+
   for (const name of target) {
     const stripped = stripPrefix(name, targetPrefix);
     const exact = normalizeExactBoneName(stripped);
     const semantic = semanticBoneKey(stripped);
 
     if (exact && !targetByExact.has(exact)) targetByExact.set(exact, name);
-    if (semantic && !targetBySemantic.has(semantic)) targetBySemantic.set(semantic, name);
+
+    if (semantic) {
+      const current = targetBySemantic.get(semantic);
+      if (!current || targetScore(name) > targetScore(current)) {
+        targetBySemantic.set(semantic, name);
+      }
+    }
   }
 
   const pairs = [];
@@ -279,7 +298,7 @@ export function autoMatchPairs(sourceNames, targetNames, sourcePrefix = '', targ
       source: smartStoredName(sourceName, sourcePrefix, source),
       target: smartStoredName(targetName, targetPrefix, target),
       channels: shouldTransferLocation(semantic) ? 'LOC_ROT' : 'ROT',
-      axes: semantic === 'hips' || semantic === 'root' ? 'XYZ' : 'XYZ',
+      axes: 'XYZ',
       influence: 1,
     }));
   }
@@ -981,21 +1000,44 @@ function normalizeExactBoneName(name) {
 function semanticBoneKey(name) {
   let raw = String(name || '').toLowerCase();
 
-  const side =
-    /(^|[._:\-])left([._:\-]|$)|(^|[._:\-])l([._:\-]|$)|\.l$|_l$|^left|^l(?=[a-z])/.test(raw)
-      ? 'left'
-      : /(^|[._:\-])right([._:\-]|$)|(^|[._:\-])r([._:\-]|$)|\.r$|_r$|^right|^r(?=[a-z])/.test(raw)
-        ? 'right'
-        : '';
-
-  raw = raw
+  let probe = raw
     .replace(/^mixamorig\d*[:_]?/, '')
-    .replace(/^(def|org|mch|ctrl)[-_:]/, '')
-    .replace(/\.l$|\.r$|_l$|_r$/g, '')
-    .replace(/left|right/g, '')
-    .replace(/[^a-z0-9]/g, '');
+    .replace(/^(def|org|mch|ctrl)[-_:]/, '');
 
-  const fingerMatch = raw.match(/(thumb|index|middle|ring|pinky|little)(?:finger)?0*([123])/);
+  const compact = probe.replace(/[^a-z0-9]/g, '');
+
+  const explicitLeft =
+    /(^|[._:\-])left([._:\-]|$)|(^|[._:\-])l([._:\-]|$)|\.l$|_l$|^left/.test(probe);
+  const explicitRight =
+    /(^|[._:\-])right([._:\-]|$)|(^|[._:\-])r([._:\-]|$)|\.r$|_r$|^right/.test(probe);
+
+  const anatomicalStem =
+    '(?:shoulder|clavicle|upperarm|forearm|lowerarm|arm|hand|wrist|' +
+    'thumb\\d*|index\\d*|middle\\d*|ring\\d*|pinky\\d*|little\\d*|' +
+    'finger[a-z0-9]*|upperleg|thigh|lowerleg|leg|calf|shin|knee|foot|ankle|' +
+    'toe(?:base)?|toes)';
+
+  const sanitizedLeft = new RegExp(anatomicalStem + 'l$').test(compact);
+  const sanitizedRight = new RegExp(anatomicalStem + 'r$').test(compact);
+
+  const side = explicitLeft || sanitizedLeft
+    ? 'left'
+    : explicitRight || sanitizedRight
+      ? 'right'
+      : '';
+
+  probe = probe
+    .replace(/\.l$|\.r$|_l$|_r$/g, '')
+    .replace(/left|right/g, '');
+
+  if (sanitizedLeft || sanitizedRight) {
+    probe = probe.replace(/[lr]$/, '');
+  }
+
+  raw = probe.replace(/[^a-z0-9]/g, '');
+
+  const fingerMatch = raw.match(/(?:finger)?(thumb|index|middle|ring|pinky|little)(?:finger)?0*([123])/)
+    || raw.match(/(thumb|index|middle|ring|pinky|little)(?:finger)?0*([123])/);
   if (fingerMatch) {
     const finger = fingerMatch[1] === 'little' ? 'pinky' : fingerMatch[1];
     return side + finger + fingerMatch[2];
