@@ -17,7 +17,7 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js';
+} from './retargeting.js?v=20260918-28';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -4626,8 +4626,8 @@ function makeRetargetPairRow(pair) {
   sourceInput.addEventListener('input', () => {
     pair.source = sourceInput.value;
     markRetargetPresetDirty();
-    renderRetargetPairs();
   });
+  sourceInput.addEventListener('change', renderRetargetPairs);
   sourceCell.appendChild(sourceInput);
 
   const targetCell = document.createElement('td');
@@ -4641,8 +4641,8 @@ function makeRetargetPairRow(pair) {
   targetInput.addEventListener('input', () => {
     pair.target = targetInput.value;
     markRetargetPresetDirty();
-    renderRetargetPairs();
   });
+  targetInput.addEventListener('change', renderRetargetPairs);
   targetCell.appendChild(targetInput);
 
   const channelsCell = document.createElement('td');
@@ -5102,7 +5102,7 @@ async function importRetargetPresetFile(file) {
 
   try {
     const textValue = await file.text();
-    const data = normalizePresetData(JSON.parse(textValue), stripExt(file.name));
+    const data = normalizePresetData(JSON.parse(textValue), file.name.replace(/\.json$/i, ''));
     applyRetargetPresetData(data, '__UNSAVED__');
     markRetargetPresetDirty();
     setRetargetProgress(0, 'Preset JSON importado: ' + file.name + '.');
