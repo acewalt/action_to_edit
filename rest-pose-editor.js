@@ -156,7 +156,7 @@ export class RestPoseEditor {
     this.sourceHelper.material.color.setHex(0x9ecbff);
     this.sourceHelper.material.depthTest = false;
     this.sourceHelper.renderOrder = 20;
-    this.sourceGroup.add(this.sourceHelper);
+    this.scene.add(this.sourceHelper);
 
     this.targetHelper = new THREE.SkeletonHelper(this.targetRoot);
     this.targetHelper.material.color.setHex(0xffce78);
@@ -164,7 +164,7 @@ export class RestPoseEditor {
     this.targetHelper.material.opacity = 0.72;
     this.targetHelper.material.depthTest = false;
     this.targetHelper.renderOrder = 19;
-    this.targetGroup.add(this.targetHelper);
+    this.scene.add(this.targetHelper);
 
     this.alignForComparison();
     this.buildMarkers();
@@ -188,10 +188,12 @@ export class RestPoseEditor {
     this.clearMarkers();
 
     if (this.sourceHelper) {
+      this.scene.remove(this.sourceHelper);
       this.sourceHelper.dispose?.();
       this.sourceHelper = null;
     }
     if (this.targetHelper) {
+      this.scene.remove(this.targetHelper);
       this.targetHelper.dispose?.();
       this.targetHelper = null;
     }
