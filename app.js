@@ -5883,6 +5883,9 @@ async function applyCurrentRetargeting() {
         ikSkippedChains: result.report.ikSkippedChains || [],
         fkRequestedPairs: result.report.fkRequestedPairs || 0,
         fkResolvedPairs: result.report.fkResolvedPairs || 0,
+        generatedTrackCount: result.report.generatedTrackCount || 0,
+        generatedRotationTracks: result.report.generatedRotationTracks || 0,
+        generatedPositionTracks: result.report.generatedPositionTracks || 0,
       },
     };
 
@@ -5936,6 +5939,15 @@ async function applyCurrentRetargeting() {
         ? ' · Root Motion ON'
         : ' · Root Motion OFF');
 
+    const trackNote =
+      ' · Tracks ' +
+      (result.report.generatedTrackCount || 0) +
+      ' (ROT ' +
+      (result.report.generatedRotationTracks || 0) +
+      ', POS ' +
+      (result.report.generatedPositionTracks || 0) +
+      ')';
+
     const redirectedCount =
       result.report.redirectedPairs?.length || 0;
 
@@ -5969,6 +5981,7 @@ async function applyCurrentRetargeting() {
         result.report.sampleCount +
         ' samples' +
         fkNote +
+        trackNote +
         deformNote +
         baselineNote +
         ikNote2
