@@ -509,20 +509,27 @@ export class RestPoseEditor {
   alignForComparison() {
     if (!this.sourceRoot || !this.targetRoot) return;
 
-    this.sourceGroup.position.set(0, 0, 0);
-    this.sourceGroup.quaternion.identity();
-    this.sourceGroup.scale.set(1, 1, 1);
+    for (const group of [this.sourceGroup, this.targetGroup]) {
+      group.position.set(0, 0, 0);
+      group.quaternion.identity();
+      group.scale.set(1, 1, 1);
+      group.updateMatrixWorld(true);
+    }
 
-    this.targetGroup.position.set(0, 0, 0);
-    this.targetGroup.quaternion.identity();
-    this.targetGroup.scale.set(1, 1, 1);
+    // Normalize only DISPLAY orientation. Retarget data remains untouched.
+    // This makes rigs exported with different FBX up/front conventions stand
+    // upright together, like Blender's viewport.
+    normalizeHumanoidDisplayOrientation(
+      this.sourceGroup,
+      this.sourceBones
+    );
+    normalizeHumanoidDisplayOrientation(
+      this.targetGroup,
+      this.targetBones
+    );
 
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
-
-    // Redefine Rest Pose is a comparison viewport, not the bake. Keep each
-    // FBX at its real imported scale and place BOTH rigs on the same origin.
-    this.displayScaleRatio = 1;
 
     const sourceSet = chooseDisplayBoneSet(this.sourceBones);
     const targetSet = chooseDisplayBoneSet(this.targetBones);
@@ -532,7 +539,45 @@ export class RestPoseEditor {
 
     if (!sourceBox || !targetBox) return;
 
-    const centerRigOnOrigin = (group, box) => {
+    let sourceHeight = Math.max(
+      sourceBox.max.y - sourceBox.min.y,
+      0.001
+    );
+
+    let targetHeight = Math.max(
+      targetBox.max.y - targetBox.min.y,
+      0.001
+    );
+
+    // FBX rigs commonly differ by powers of 10/100 because one file is in
+    // meters and another in centimeters. Blender resolves those unit systems
+    // on import; Three.js preserves the raw numeric scale. Correct only that
+    // obvious unit mismatch while preserving the remaining real size ratio
+    // (adult vs child, etc.).
+    const ratio = targetHeight / sourceHeight;
+
+    if (
+      Number.isFinite(ratio) &&
+      (ratio > 8 || ratio < 0.125)
+    ) {
+      const unitCorrection = Math.pow(
+        10,
+        -Math.round(Math.log10(ratio))
+      );
+
+      if (
+        Number.isFinite(unitCorrection) &&
+        unitCorrection > 0
+      ) {
+        this.targetGroup.scale.multiplyScalar(unitCorrection);
+        this.targetGroup.updateMatrixWorld(true);
+      }
+    }
+
+    sourceBox = boxFromBones(this.sourceBones, sourceSet);
+    targetBox = boxFromBones(this.targetBones, targetSet);
+
+    const centerOnOrigin = (group, box) => {
       const centerX = (box.min.x + box.max.x) * 0.5;
       const centerZ = (box.min.z + box.max.z) * 0.5;
 
@@ -542,11 +587,12 @@ export class RestPoseEditor {
       group.updateMatrixWorld(true);
     };
 
-    centerRigOnOrigin(this.sourceGroup, sourceBox);
-    centerRigOnOrigin(this.targetGroup, targetBox);
+    // Both characters share the same X/Z origin and ground Y=0.
+    centerOnOrigin(this.sourceGroup, sourceBox);
+    centerOnOrigin(this.targetGroup, targetBox);
 
-    // Both now share X=0, Z=0 and ground Y=0, matching the Blender comparison
-    // workflow. Their different body sizes remain intact.
+    this.displayScaleRatio = 1;
+
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
   }
@@ -871,14 +917,14 @@ export class RestPoseEditor {
       const handle = new THREE.Mesh(geometry, material);
       const semantic = semanticNameForHandle(bone.name);
 
-      let scale = sourceHeight * 0.072;
+      let scale = sourceHeight * 0.055;
       if (/hips|spine|chest|head|neck/.test(semantic)) {
-        scale *= 1.35;
+        scale *= 1.2;
       } else if (/hand|foot/.test(semantic)) {
-        scale *= 0.72;
+        scale *= 0.8;
       }
 
-      scale = THREE.MathUtils.clamp(scale, 0.035, 0.24);
+      scale = Math.max(scale, sourceHeight * 0.018);
 
       handle.scale.setScalar(scale);
       handle.userData.baseScale = scale;
@@ -906,13 +952,12 @@ export class RestPoseEditor {
       0.1
     );
 
-    const radius = THREE.MathUtils.clamp(
+    const radius = Math.max(
       sourceHeight * 0.026,
-      0.018,
-      0.075
+      0.012
     );
 
-    const geometry = new THREE.SphereGeometry(radius, 18, 14);
+    const geometry = new THREE.SphereGeometry(radius, 20, 16);
     this.ikHandleGeometry = geometry;
 
     const specs = [
@@ -923,17 +968,29 @@ export class RestPoseEditor {
     ];
 
     for (const [id, endSemantic, lowerSemantic, upperSemantic] of specs) {
-      const endBone = findBestBoneBySemantic(this.sourceBones, endSemantic);
-      const lowerBone = findAncestorBySemantic(endBone, lowerSemantic);
-      const upperBone = findAncestorBySemantic(lowerBone, upperSemantic);
+      const endBone = findBestBoneBySemantic(
+        this.sourceBones,
+        endSemantic
+      );
+
+      const lowerBone =
+        findAncestorBySemantic(endBone, lowerSemantic) ||
+        findBestBoneBySemantic(this.sourceBones, lowerSemantic);
+
+      const upperBone =
+        findAncestorBySemantic(lowerBone, upperSemantic) ||
+        findBestBoneBySemantic(this.sourceBones, upperSemantic);
 
       if (!endBone || !lowerBone || !upperBone) continue;
 
       const material = new THREE.MeshBasicMaterial({
-        color: /left/i.test(id) ? 0x42c8ff : 0xff7b42,
+        color: /hand/i.test(id)
+          ? 0x35d7ff
+          : 0xffcf3a,
         transparent: true,
-        opacity: 0.98,
+        opacity: 1,
         depthTest: false,
+        depthWrite: false,
       });
 
       const handle = new THREE.Mesh(geometry, material);
@@ -2382,6 +2439,91 @@ function findOppositeBoneName(name, names) {
   }
 
   return '';
+}
+
+function normalizeHumanoidDisplayOrientation(group, bones) {
+  if (!group || !bones?.size) return;
+
+  group.updateMatrixWorld(true);
+
+  const hips =
+    findBestBoneBySemantic(bones, 'hips') ||
+    findBestBoneBySemantic(bones, 'spine');
+
+  const head =
+    findBestBoneBySemantic(bones, 'head') ||
+    findBestBoneBySemantic(bones, 'neck');
+
+  if (!hips || !head) return;
+
+  const hipsPos = new THREE.Vector3();
+  const headPos = new THREE.Vector3();
+
+  hips.getWorldPosition(hipsPos);
+  head.getWorldPosition(headPos);
+
+  const up = headPos.clone().sub(hipsPos);
+
+  if (up.lengthSq() < 1e-10) return;
+  up.normalize();
+
+  const left =
+    findBestBoneBySemantic(bones, 'leftshoulder') ||
+    findBestBoneBySemantic(bones, 'leftthigh');
+
+  const right =
+    findBestBoneBySemantic(bones, 'rightshoulder') ||
+    findBestBoneBySemantic(bones, 'rightthigh');
+
+  let rightAxis = new THREE.Vector3(1, 0, 0);
+
+  if (left && right) {
+    const leftPos = new THREE.Vector3();
+    const rightPos = new THREE.Vector3();
+
+    left.getWorldPosition(leftPos);
+    right.getWorldPosition(rightPos);
+
+    rightAxis.copy(rightPos).sub(leftPos);
+
+    if (rightAxis.lengthSq() < 1e-10) {
+      rightAxis.set(1, 0, 0);
+    }
+  }
+
+  // Make right orthogonal to up.
+  rightAxis.addScaledVector(
+    up,
+    -rightAxis.dot(up)
+  );
+
+  if (rightAxis.lengthSq() < 1e-10) {
+    rightAxis.set(1, 0, 0);
+  }
+
+  rightAxis.normalize();
+
+  const forward = new THREE.Vector3()
+    .crossVectors(rightAxis, up)
+    .normalize();
+
+  if (forward.lengthSq() < 1e-10) return;
+
+  const basis = new THREE.Matrix4().makeBasis(
+    rightAxis,
+    up,
+    forward
+  );
+
+  const currentBasis = new THREE.Quaternion()
+    .setFromRotationMatrix(basis)
+    .normalize();
+
+  group.quaternion.premultiply(
+    currentBasis.invert()
+  );
+
+  group.updateMatrixWorld(true);
 }
 
 function findBestBoneBySemantic(bones, semantic) {
