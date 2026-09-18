@@ -93,6 +93,7 @@ const state = {
   axisViewReturnMode: 'perspective',
   axisViewQuaternion: null,
   axisAutoSwitchPending: false,
+  blenderNavDrag: null,
   motionPanelOpen: true,
   rootGizmoEnabled: false,
   rootGizmoDragging: false,
@@ -133,6 +134,14 @@ controls.dampingFactor = 0.08;
 controls.screenSpacePanning = true;
 controls.zoomToCursor = false;
 controls.target.set(0, 1, 0);
+
+// Blender-style mouse navigation:
+// MMB = orbit, Shift+MMB = pan (handled natively by OrbitControls when
+// MIDDLE is ROTATE), Ctrl+MMB = dolly (switched dynamically on pointerdown).
+// Left/right mouse are left free for editing/selection instead of camera nav.
+controls.mouseButtons.LEFT = null;
+controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+controls.mouseButtons.RIGHT = null;
 
 const rootGizmoProxy = new THREE.Object3D();
 rootGizmoProxy.name = '__action_root_offset_gizmo__';
@@ -1619,6 +1628,119 @@ function axisViewDefinition(axisView) {
   return definitions[axisView] || definitions['+z'];
 }
 
+function nearestAxisViewFromDirection(direction) {
+  const dir = direction.clone().normalize();
+  const candidates = [
+    ['+x', new THREE.Vector3(1, 0, 0)],
+    ['-x', new THREE.Vector3(-1, 0, 0)],
+    ['+y', new THREE.Vector3(0, 1, 0)],
+    ['-y', new THREE.Vector3(0, -1, 0)],
+    ['+z', new THREE.Vector3(0, 0, 1)],
+    ['-z', new THREE.Vector3(0, 0, -1)],
+  ];
+
+  let bestKey = '+z';
+  let bestDot = -Infinity;
+
+  for (const [key, axis] of candidates) {
+    const dot = dir.dot(axis);
+    if (dot > bestDot) {
+      bestDot = dot;
+      bestKey = key;
+    }
+  }
+
+  return bestKey;
+}
+
+function virtualOrbitDirectionFromDrag(drag, dx, dy) {
+  const yaw = -dx * 0.0075;
+  const pitch = -dy * 0.0075;
+
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  const qYaw = new THREE.Quaternion().setFromAxisAngle(worldUp, yaw);
+
+  const direction = drag.startDirection.clone().applyQuaternion(qYaw).normalize();
+  const right = drag.startRight.clone().applyQuaternion(qYaw).normalize();
+  const qPitch = new THREE.Quaternion().setFromAxisAngle(right, pitch);
+
+  direction.applyQuaternion(qPitch).normalize();
+  return direction;
+}
+
+function beginBlenderAxisSnap(event) {
+  const target = controls.target.clone();
+  const startDirection = camera.position.clone().sub(target);
+
+  if (startDirection.lengthSq() < 1e-10) startDirection.set(0.32, 0.12, 1);
+  startDirection.normalize();
+
+  const startRight = new THREE.Vector3(1, 0, 0)
+    .applyQuaternion(camera.quaternion)
+    .normalize();
+
+  state.blenderNavDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    startDirection,
+    startRight,
+    lastAxis: null,
+    moved: false,
+  };
+
+  controls.enabled = false;
+
+  try {
+    renderer.domElement.setPointerCapture(event.pointerId);
+  } catch {}
+
+  setStatus(
+    'Alt + MMB: arrastra hacia una dirección para saltar a una vista ortográfica.',
+    'info'
+  );
+}
+
+function updateBlenderAxisSnap(event) {
+  const drag = state.blenderNavDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+
+  const dx = event.clientX - drag.startX;
+  const dy = event.clientY - drag.startY;
+  const distance = Math.hypot(dx, dy);
+
+  if (distance < 10) return;
+
+  drag.moved = true;
+
+  const virtualDirection = virtualOrbitDirectionFromDrag(drag, dx, dy);
+  const axisView = nearestAxisViewFromDirection(virtualDirection);
+
+  if (axisView === drag.lastAxis) return;
+
+  drag.lastAxis = axisView;
+  switchToAxisView(axisView);
+}
+
+function endBlenderAxisSnap(event) {
+  const drag = state.blenderNavDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+
+  state.blenderNavDrag = null;
+  controls.enabled = true;
+  controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+
+  try {
+    renderer.domElement.releasePointerCapture(event.pointerId);
+  } catch {}
+
+  if (!drag.moved) {
+    setStatus('Alt + MMB: arrastra para elegir una vista ortográfica.', 'info');
+  }
+
+  flushOrbitControls();
+}
+
 function switchToAxisView(axisView) {
   const def = axisViewDefinition(axisView);
   const target = controls.target.clone();
@@ -2038,6 +2160,7 @@ function clearAll() {
   state.axisViewQuaternion = null;
   state.axisAutoSwitchPending = false;
   state.axisViewReturnMode = 'perspective';
+  state.blenderNavDrag = null;
   hideRootGizmo();
 
   resetPlaybackUi();
@@ -2348,6 +2471,51 @@ rootTransformControls.addEventListener('mouseUp', () => {
     ensureActionEdit(record).rootOffset.x + ' · Y ' +
     ensureActionEdit(record).rootOffset.y + ' · Z ' +
     ensureActionEdit(record).rootOffset.z + '.', 'ok');
+});
+
+renderer.domElement.addEventListener('pointerdown', (event) => {
+  if (event.pointerType === 'touch' || event.button !== 1 || state.rootGizmoDragging) return;
+
+  // Prevent browser middle-click auto-scroll and configure OrbitControls
+  // before its bubble-phase pointerdown handler reads mouseButtons.MIDDLE.
+  event.preventDefault();
+
+  if (event.altKey) {
+    event.stopImmediatePropagation();
+    beginBlenderAxisSnap(event);
+    return;
+  }
+
+  controls.mouseButtons.MIDDLE =
+    (event.ctrlKey || event.metaKey)
+      ? THREE.MOUSE.DOLLY
+      : THREE.MOUSE.ROTATE;
+}, { capture: true });
+
+window.addEventListener('pointermove', (event) => {
+  if (!state.blenderNavDrag) return;
+  event.preventDefault();
+  updateBlenderAxisSnap(event);
+}, { passive: false });
+
+window.addEventListener('pointerup', (event) => {
+  if (state.blenderNavDrag) {
+    endBlenderAxisSnap(event);
+  }
+
+  controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+});
+
+window.addEventListener('pointercancel', (event) => {
+  if (state.blenderNavDrag) {
+    endBlenderAxisSnap(event);
+  }
+
+  controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+});
+
+renderer.domElement.addEventListener('auxclick', (event) => {
+  if (event.button === 1) event.preventDefault();
 });
 
 controls.addEventListener('change', handleAxisViewAutoProjection);
