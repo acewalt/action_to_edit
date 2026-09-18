@@ -290,6 +290,33 @@ button { color: inherit; }
   color: var(--text);
 }
 .action-list { padding-right: 2px; }
+.action-group-divider {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 5px 0 2px;
+  padding: 8px 9px;
+  border-top: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line);
+  background: rgba(17, 20, 25, .96);
+  color: var(--warn);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.action-group-divider span:last-child {
+  min-width: 22px;
+  text-align: center;
+  border: 1px solid rgba(227,189,112,.3);
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: var(--warn);
+}
 .action-card {
   border: 1px solid var(--line);
   background: var(--panel-2);
