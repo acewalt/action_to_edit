@@ -55,7 +55,6 @@ const els = {
   trimEndValue: $('#trimEndValue'),
   resetTrimBtn: $('#resetTrimBtn'),
   mirrorActionCheckbox: $('#mirrorActionCheckbox'),
-  rootTargetSelect: $('#rootTargetSelect'),
   rootResolvedName: $('#rootResolvedName'),
   rootOffsetX: $('#rootOffsetX'),
   rootOffsetY: $('#rootOffsetY'),
@@ -92,6 +91,7 @@ const state = {
   skeletonHelper: null,
   skeletonVisible: false,
   previewStage: null,
+  actionTransformNode: null,
   projectionMode: 'perspective',
   freeProjectionMode: 'perspective',
   orthoViewHeight: 4,
@@ -110,6 +110,9 @@ const state = {
   exporting: false,
 };
 
+const ACTION_TRANSFORM_NAME = '__ActionToEdit_ActionTransform__';
+const EXPORT_CONTAINER_NAME = '__ActionToEdit_ExportContainer__';
+
 const fbxLoader = new FBXLoader();
 fbxLoader.trimAnimationClips = true;
 
@@ -120,6 +123,13 @@ const previewStage = new THREE.Group();
 previewStage.name = '__preview_stage__';
 scene.add(previewStage);
 state.previewStage = previewStage;
+
+// This is the non-destructive per-Action transform layer. The animated rig is
+// a CHILD of this object, so moving/rotating it never rewrites any bone curve.
+const actionTransformNode = new THREE.Group();
+actionTransformNode.name = ACTION_TRANSFORM_NAME;
+previewStage.add(actionTransformNode);
+state.actionTransformNode = actionTransformNode;
 
 const perspectiveCamera = new THREE.PerspectiveCamera(42, 1, 0.01, 100000);
 perspectiveCamera.position.set(3, 2.4, 5);
@@ -230,7 +240,6 @@ function defaultActionEdit() {
     trimStart: 0,
     trimEnd: 100,
     mirror: false,
-    rootTarget: 'auto',
     rootOffset: { x: 0, y: 0, z: 0 },
     rootRotation: { x: 0, y: 0, z: 0 },
   };
@@ -378,136 +387,69 @@ function applyArmSpace(clip, value) {
   }
 }
 
-function applyRootOffset(clip, record, baseAsset) {
+function applyActionTransformTracks(clip, record) {
   const edit = ensureActionEdit(record);
   const offset = edit.rootOffset || { x: 0, y: 0, z: 0 };
+  const rotation = edit.rootRotation || { x: 0, y: 0, z: 0 };
+
   const ox = Number(offset.x) || 0;
   const oy = Number(offset.y) || 0;
   const oz = Number(offset.z) || 0;
-  if (Math.abs(ox) + Math.abs(oy) + Math.abs(oz) < 1e-9) return;
-
-  const targetName = resolveRootTarget(record, baseAsset);
-  if (!targetName) return;
-
-  let positionTrack = null;
-  for (const track of clip.tracks) {
-    let parsed;
-    try {
-      parsed = THREE.PropertyBinding.parseTrackName(track.name);
-    } catch {
-      continue;
-    }
-
-    if (parsed.nodeName === targetName && parsed.propertyName === 'position') {
-      positionTrack = track;
-      break;
-    }
-  }
-
-  if (positionTrack) {
-    for (let i = 0; i < positionTrack.values.length; i += 3) {
-      positionTrack.values[i] += ox;
-      positionTrack.values[i + 1] += oy;
-      positionTrack.values[i + 2] += oz;
-    }
-    return;
-  }
-
-  const rest = baseAsset?.restPose?.get(targetName);
-  if (!rest) return;
-
-  const duration = Math.max(clip.duration || 0, 1 / 30);
-  clip.tracks.push(new THREE.VectorKeyframeTrack(
-    targetName + '.position',
-    [0, duration],
-    [
-      rest.position.x + ox, rest.position.y + oy, rest.position.z + oz,
-      rest.position.x + ox, rest.position.y + oy, rest.position.z + oz,
-    ]
-  ));
-}
-
-function applyRootRotation(clip, record, baseAsset) {
-  const edit = ensureActionEdit(record);
-  const rotation = edit.rootRotation || { x: 0, y: 0, z: 0 };
   const rx = Number(rotation.x) || 0;
   const ry = Number(rotation.y) || 0;
   const rz = Number(rotation.z) || 0;
 
-  if (Math.abs(rx) + Math.abs(ry) + Math.abs(rz) < 1e-9) return;
+  const duration = Math.max(clip.duration || 0, 1 / 30);
 
-  const targetName = resolveRootTarget(record, baseAsset);
-  if (!targetName) return;
+  // This transform is intentionally OUTSIDE the rig. Internal Hips/root/bone
+  // curves are never modified, so walk cycles and root motion remain intact.
+  clip.tracks = clip.tracks.filter((track) => {
+    try {
+      const parsed = THREE.PropertyBinding.parseTrackName(track.name);
+      return parsed.nodeName !== ACTION_TRANSFORM_NAME;
+    } catch {
+      return true;
+    }
+  });
 
-  // The stored X/Y/Z values are WORLD/GLOBAL rotations. Bone quaternion
-  // keyframes are local to their parent, so convert the world-space offset
-  // into the target's parent space before applying it.
-  const worldOffset = new THREE.Quaternion().setFromEuler(
+  const hasPosition =
+    Math.abs(ox) + Math.abs(oy) + Math.abs(oz) > 1e-9;
+
+  const hasRotation =
+    Math.abs(rx) + Math.abs(ry) + Math.abs(rz) > 1e-9;
+
+  // Always author the transform tracks, even at identity, so every Action
+  // explicitly resets the wrapper when switching clips.
+  clip.tracks.push(new THREE.VectorKeyframeTrack(
+    ACTION_TRANSFORM_NAME + '.position',
+    [0, duration],
+    [ox, oy, oz, ox, oy, oz]
+  ));
+
+  const q = new THREE.Quaternion().setFromEuler(
     new THREE.Euler(
       THREE.MathUtils.degToRad(rx),
       THREE.MathUtils.degToRad(ry),
       THREE.MathUtils.degToRad(rz),
       'XYZ'
     )
-  );
+  ).normalize();
 
-  const rest = baseAsset?.restPose?.get(targetName);
-  const parentWorld = rest?.parentWorldQuaternion?.clone() || new THREE.Quaternion();
-  const localOffset = parentWorld
-    .clone()
-    .invert()
-    .multiply(worldOffset)
-    .multiply(parentWorld)
-    .normalize();
-
-  let quaternionTrack = null;
-
-  for (const track of clip.tracks) {
-    let parsed;
-    try {
-      parsed = THREE.PropertyBinding.parseTrackName(track.name);
-    } catch {
-      continue;
-    }
-
-    if (parsed.nodeName === targetName && parsed.propertyName === 'quaternion') {
-      quaternionTrack = track;
-      break;
-    }
-  }
-
-  const q = new THREE.Quaternion();
-
-  if (quaternionTrack) {
-    for (let i = 0; i < quaternionTrack.values.length; i += 4) {
-      q.set(
-        quaternionTrack.values[i],
-        quaternionTrack.values[i + 1],
-        quaternionTrack.values[i + 2],
-        quaternionTrack.values[i + 3]
-      ).normalize();
-
-      // Premultiply = rotate around the converted GLOBAL axes.
-      q.premultiply(localOffset).normalize();
-
-      quaternionTrack.values[i] = q.x;
-      quaternionTrack.values[i + 1] = q.y;
-      quaternionTrack.values[i + 2] = q.z;
-      quaternionTrack.values[i + 3] = q.w;
-    }
-    return;
-  }
-
-  if (!rest) return;
-
-  q.copy(rest.quaternion).premultiply(localOffset).normalize();
-
-  const duration = Math.max(clip.duration || 0, 1 / 30);
   clip.tracks.push(new THREE.QuaternionKeyframeTrack(
-    targetName + '.quaternion',
+    ACTION_TRANSFORM_NAME + '.quaternion',
     [0, duration],
     [q.x, q.y, q.z, q.w, q.x, q.y, q.z, q.w]
   ));
+
+  // Explicit scale identity prevents stale transform values from a previous
+  // clip if the mixer has cached this node.
+  clip.tracks.push(new THREE.VectorKeyframeTrack(
+    ACTION_TRANSFORM_NAME + '.scale',
+    [0, duration],
+    [1, 1, 1, 1, 1, 1]
+  ));
+
+  return hasPosition || hasRotation;
 }
 
 function trimClipByPercent(clip, startPct, endPct) {
@@ -564,8 +506,7 @@ function applyActionEditPipeline(clip, record, baseAsset) {
   if (edit.mirror) mirrorAnimationClip(clip);
   applyOverdrive(clip, edit.overdrive);
   applyArmSpace(clip, edit.armSpace);
-  applyRootOffset(clip, record, baseAsset);
-  applyRootRotation(clip, record, baseAsset);
+  applyActionTransformTracks(clip, record);
   trimClipByPercent(clip, edit.trimStart, edit.trimEnd);
 
   clip.resetDuration();
@@ -937,6 +878,16 @@ function normalizePreview(object) {
   previewStage.position.set(0, 0, 0);
   previewStage.rotation.set(0, 0, 0);
   previewStage.scale.setScalar(1);
+
+  const savedActionPosition = state.actionTransformNode.position.clone();
+  const savedActionQuaternion = state.actionTransformNode.quaternion.clone();
+  const savedActionScale = state.actionTransformNode.scale.clone();
+
+  // Normalization is based on the original model, never on an Action offset.
+  state.actionTransformNode.position.set(0, 0, 0);
+  state.actionTransformNode.quaternion.identity();
+  state.actionTransformNode.scale.set(1, 1, 1);
+
   previewStage.updateMatrixWorld(true);
   object.updateMatrixWorld(true);
 
@@ -949,6 +900,10 @@ function normalizePreview(object) {
     setStatus('El FBX cargó, pero no se pudo calcular su volumen visual. Intentando vista de respaldo.', 'warn');
     previewStage.position.set(0, 0, 0);
     previewStage.scale.setScalar(1);
+    state.actionTransformNode.position.copy(savedActionPosition);
+    state.actionTransformNode.quaternion.copy(savedActionQuaternion);
+    state.actionTransformNode.scale.copy(savedActionScale);
+    state.actionTransformNode.updateMatrixWorld(true);
     return false;
   }
 
@@ -958,6 +913,10 @@ function normalizePreview(object) {
 
   if (!Number.isFinite(maxDim) || maxDim <= 1e-8) {
     setStatus('El FBX no tiene un volumen visible utilizable para auto-encuadre.', 'warn');
+    state.actionTransformNode.position.copy(savedActionPosition);
+    state.actionTransformNode.quaternion.copy(savedActionQuaternion);
+    state.actionTransformNode.scale.copy(savedActionScale);
+    state.actionTransformNode.updateMatrixWorld(true);
     return false;
   }
 
@@ -971,6 +930,11 @@ function normalizePreview(object) {
     -center.z * scale
   );
   previewStage.updateMatrixWorld(true);
+
+  state.actionTransformNode.position.copy(savedActionPosition);
+  state.actionTransformNode.quaternion.copy(savedActionQuaternion);
+  state.actionTransformNode.scale.copy(savedActionScale);
+  state.actionTransformNode.updateMatrixWorld(true);
   object.updateMatrixWorld(true);
 
   return true;
@@ -978,16 +942,7 @@ function normalizePreview(object) {
 
 function findRootTargetObject(record = getActiveRecord(), base = getBaseAsset()) {
   if (!record || !base) return null;
-  const targetName = resolveRootTarget(record, base);
-  if (!targetName) return null;
-
-  if (ensureActionEdit(record).rootTarget === 'object') return base.object;
-
-  let found = null;
-  base.object.traverse((node) => {
-    if (!found && node.name === targetName) found = node;
-  });
-  return found;
+  return state.actionTransformNode;
 }
 
 function roundOffsetValue(value, step) {
@@ -1106,23 +1061,6 @@ function updateRootGizmoPosition() {
   rootGizmoProxy.updateMatrixWorld(true);
 }
 
-function populateRootTargetSelect(record, base) {
-  const edit = ensureActionEdit(record);
-  const current = edit.rootTarget || 'auto';
-  const boneNames = collectBoneNames(base?.object);
-
-  els.rootTargetSelect.innerHTML =
-    '<option value="auto">Auto · Hips</option>' +
-    '<option value="object">Objeto root</option>' +
-    boneNames.map((name) =>
-      '<option value="' + name.replace(/"/g, '&quot;') + '">' + name + '</option>'
-    ).join('');
-
-  const valid = current === 'auto' || current === 'object' || boneNames.includes(current);
-  edit.rootTarget = valid ? current : 'auto';
-  els.rootTargetSelect.value = edit.rootTarget;
-}
-
 function updateTrimVisuals(edit, record) {
   const start = Number(edit.trimStart) || 0;
   const end = Number(edit.trimEnd) || 100;
@@ -1166,13 +1104,8 @@ function renderMotionPanel() {
 
   els.mirrorActionCheckbox.checked = Boolean(edit.mirror);
 
-  populateRootTargetSelect(record, base);
   els.rootResolvedName.textContent =
-    edit.rootTarget === 'auto'
-      ? 'Auto → ' + (resolveRootTarget(record, base) || '—')
-      : edit.rootTarget === 'object'
-        ? 'Objeto → ' + (base.object.name || 'root')
-        : edit.rootTarget;
+    'Todo el rig · ' + ACTION_TRANSFORM_NAME;
 
   updateRootOffsetFields(edit);
   configureRootCombinedGizmoUi();
@@ -1400,8 +1333,7 @@ function resetPlaybackUi() {
 function disposeMixer() {
   if (state.mixer) {
     state.mixer.stopAllAction();
-    const base = getBaseAsset();
-    if (base) state.mixer.uncacheRoot(base.object);
+    if (state.actionTransformNode) state.mixer.uncacheRoot(state.actionTransformNode);
   }
   state.mixer = null;
   state.currentAction = null;
@@ -1413,7 +1345,9 @@ function setBaseAsset(assetId) {
   if (!next) return;
 
   const oldBase = getBaseAsset();
-  if (oldBase && oldBase.object.parent === previewStage) previewStage.remove(oldBase.object);
+  if (oldBase && oldBase.object.parent === state.actionTransformNode) {
+    state.actionTransformNode.remove(oldBase.object);
+  }
   if (state.skeletonHelper) {
     scene.remove(state.skeletonHelper);
     state.skeletonHelper.dispose?.();
@@ -1422,9 +1356,16 @@ function setBaseAsset(assetId) {
 
   disposeMixer();
   state.baseAssetId = next.id;
-  previewStage.add(next.object);
+
+  // Reset the non-destructive Action Transform before mounting another rig.
+  state.actionTransformNode.position.set(0, 0, 0);
+  state.actionTransformNode.quaternion.identity();
+  state.actionTransformNode.scale.set(1, 1, 1);
+  state.actionTransformNode.add(next.object);
+  state.actionTransformNode.updateMatrixWorld(true);
+
   normalizePreview(next.object);
-  state.mixer = new THREE.AnimationMixer(next.object);
+  state.mixer = new THREE.AnimationMixer(state.actionTransformNode);
 
   state.skeletonHelper = new THREE.SkeletonHelper(next.object);
   state.skeletonHelper.visible = state.skeletonVisible;
@@ -1449,7 +1390,9 @@ function removeAsset(assetId) {
   if (!asset) return;
 
   if (state.baseAssetId === assetId) {
-    if (asset.object.parent === previewStage) previewStage.remove(asset.object);
+    if (asset.object.parent === state.actionTransformNode) {
+      state.actionTransformNode.remove(asset.object);
+    }
     disposeMixer();
     state.baseAssetId = null;
     if (state.skeletonHelper) {
@@ -1595,8 +1538,13 @@ function playClip(clipId, options = {}) {
   state.mixer.stopAllAction();
   state.mixer.setTime(0);
 
+  state.actionTransformNode.position.set(0, 0, 0);
+  state.actionTransformNode.quaternion.identity();
+  state.actionTransformNode.scale.set(1, 1, 1);
+  state.actionTransformNode.updateMatrixWorld(true);
+
   const clip = makeClipForBase(record, base);
-  const action = state.mixer.clipAction(clip, base.object);
+  const action = state.mixer.clipAction(clip, state.actionTransformNode);
   action.reset();
   action.setLoop(THREE.LoopRepeat, Infinity);
   action.clampWhenFinished = false;
@@ -2113,6 +2061,13 @@ function restoreBasePose() {
   const base = getBaseAsset();
   if (!base) return;
 
+  if (state.actionTransformNode) {
+    state.actionTransformNode.position.set(0, 0, 0);
+    state.actionTransformNode.quaternion.identity();
+    state.actionTransformNode.scale.set(1, 1, 1);
+    state.actionTransformNode.updateMatrixWorld(true);
+  }
+
   applyRestPose(base.object, base.restPose);
 }
 
@@ -2122,20 +2077,32 @@ function buildExportClips(base) {
 }
 
 function buildCleanExportRoot(base, clips) {
-  // IMPORTANT: export is side-effect free for the viewport.
-  // Clone the currently displayed character first, then restore ONLY the clone
-  // to its captured rest pose. Never stop/repose the live AnimationMixer here.
-  const exportRoot = SkeletonUtils.clone(base.object);
-  applyRestPose(exportRoot, base.restPose);
-  exportRoot.animations = clips;
+  // Export hierarchy:
+  // static destination correction
+  //   └─ animated Action Transform (per-clip offset/rotation)
+  //       └─ untouched rig + mesh
+  //
+  // This is deliberately equivalent to transforming an Armature object above
+  // its bone animation instead of rewriting Hips/root curves.
+  const exportContainer = new THREE.Group();
+  exportContainer.name = EXPORT_CONTAINER_NAME;
 
-  exportRoot.traverse((node) => {
-    // Preview-only helpers must never leak into the file.
+  const exportActionTransform = new THREE.Group();
+  exportActionTransform.name = ACTION_TRANSFORM_NAME;
+  exportContainer.add(exportActionTransform);
+
+  const exportRig = SkeletonUtils.clone(base.object);
+  applyRestPose(exportRig, base.restPose);
+  exportActionTransform.add(exportRig);
+
+  exportContainer.animations = clips;
+
+  exportRig.traverse((node) => {
     if (node.userData?.__previewOnly) node.visible = false;
   });
 
-  exportRoot.updateMatrixWorld(true);
-  return exportRoot;
+  exportContainer.updateMatrixWorld(true);
+  return exportContainer;
 }
 
 function rebuildExportBindPose(exportRoot) {
@@ -2465,15 +2432,6 @@ els.mirrorActionCheckbox.addEventListener('change', () => {
   refreshActivePreview();
 });
 
-els.rootTargetSelect.addEventListener('change', () => {
-  const record = getActiveRecord();
-  if (!record) return;
-  ensureActionEdit(record).rootTarget = els.rootTargetSelect.value;
-  renderMotionPanel();
-  refreshActivePreview();
-  requestAnimationFrame(updateRootGizmoAttachment);
-});
-
 function syncRootOffset() {
   const record = getActiveRecord();
   if (!record) return;
@@ -2540,7 +2498,7 @@ function toggleCombinedRootGizmo() {
 
   setStatus(
     state.rootGizmoEnabled
-      ? 'Gizmo combinado activo: flechas para mover y aros para rotar globalmente.'
+      ? 'Action Transform activo: mueve o rota todo el rig sin modificar curvas de huesos.'
       : 'Gizmo de transformación desactivado.',
     'info'
   );
