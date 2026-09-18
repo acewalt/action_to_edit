@@ -1519,8 +1519,9 @@ function buildExportClips(base) {
 }
 
 function buildCleanExportRoot(base, clips) {
-  restoreBasePose();
-
+  // IMPORTANT: export is side-effect free for the viewport.
+  // Clone the currently displayed character first, then restore ONLY the clone
+  // to its captured rest pose. Never stop/repose the live AnimationMixer here.
   const exportRoot = SkeletonUtils.clone(base.object);
   applyRestPose(exportRoot, base.restPose);
   exportRoot.animations = clips;
@@ -1617,7 +1618,7 @@ async function exportFBX() {
 
   state.exporting = true;
   updateExportState();
-  setStatus('Generando FBX corregido con ' + clips.length + ' actions...', 'info');
+  setStatus('Generando FBX en clon aislado · el preview no se modificará · ' + clips.length + ' actions...', 'info');
 
   try {
     const exportRoot = buildCleanExportRoot(base, clips);
@@ -1654,7 +1655,6 @@ async function exportFBX() {
     console.error(error);
     setStatus('Error al exportar FBX: ' + (error?.message || error), 'error');
   } finally {
-    restoreBasePose();
     state.exporting = false;
     updateExportState();
   }
@@ -1669,7 +1669,7 @@ async function exportGLB() {
 
   state.exporting = true;
   updateExportState();
-  setStatus('Generando GLB de respaldo...', 'info');
+  setStatus('Generando GLB en clon aislado · el preview no se modificará...', 'info');
 
   try {
     const exportRoot = buildCleanExportRoot(base, clips);
@@ -1691,7 +1691,6 @@ async function exportGLB() {
     console.error(error);
     setStatus('Error al exportar GLB: ' + (error?.message || error), 'error');
   } finally {
-    restoreBasePose();
     state.exporting = false;
     updateExportState();
   }
