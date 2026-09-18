@@ -516,6 +516,31 @@ button { color: inherit; }
   line-height: 1.35;
 }
 
+.gizmo-mode-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  min-width: 0;
+}
+.gizmo-tool-row-extended {
+  grid-template-columns: minmax(0, 1fr) 78px;
+}
+.transform-value-group {
+  margin-top: 9px;
+}
+.transform-value-title {
+  display: block;
+  margin: 0 0 5px;
+  color: var(--soft);
+  font-size: 8.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.rotation-grid input {
+  font-variant-numeric: tabular-nums;
+}
+
 .offset-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
