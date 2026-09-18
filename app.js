@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 
 const $ = (selector) => document.querySelector(selector);
@@ -131,6 +132,121 @@ function isEmptyClip(record) {
   );
 }
 
+function captureRestPose(object) {
+  const rest = new Map();
+  object.updateMatrixWorld(true);
+
+  object.traverse((node) => {
+    if (!node.name) return;
+
+    const worldQuaternion = new THREE.Quaternion();
+    node.getWorldQuaternion(worldQuaternion);
+
+    const parentWorldQuaternion = new THREE.Quaternion();
+    if (node.parent) node.parent.getWorldQuaternion(parentWorldQuaternion);
+
+    rest.set(node.name, {
+      position: node.position.clone(),
+      quaternion: node.quaternion.clone(),
+      scale: node.scale.clone(),
+      worldQuaternion,
+      parentWorldQuaternion,
+      parentName: node.parent?.name || null,
+    });
+  });
+
+  return rest;
+}
+
+function applyRestPose(object, restPose) {
+  if (!restPose) return;
+
+  object.traverse((node) => {
+    if (!node.name) return;
+    const rest = restPose.get(node.name);
+    if (!rest) return;
+
+    node.position.copy(rest.position);
+    node.quaternion.copy(rest.quaternion);
+    node.scale.copy(rest.scale);
+  });
+
+  object.updateMatrixWorld(true);
+
+  object.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.update();
+    }
+  });
+}
+
+function getAssetUnitScale(asset) {
+  const n = Number(asset?.unitScaleFactor);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+function retargetPositionTrack(track, sourceRest, baseRest, unitRatio) {
+  if (!sourceRest || !baseRest) return;
+
+  const values = track.values;
+  const sourceParentWorld = sourceRest.parentWorldQuaternion || new THREE.Quaternion();
+  const baseParentWorldInv = (baseRest.parentWorldQuaternion || new THREE.Quaternion()).clone().invert();
+
+  const v = new THREE.Vector3();
+  for (let i = 0; i < values.length; i += 3) {
+    v.set(
+      values[i] - sourceRest.position.x,
+      values[i + 1] - sourceRest.position.y,
+      values[i + 2] - sourceRest.position.z
+    );
+
+    // Convert the local translation delta through each rig's rest-space parent axes.
+    v.applyQuaternion(sourceParentWorld)
+      .multiplyScalar(unitRatio)
+      .applyQuaternion(baseParentWorldInv);
+
+    values[i] = baseRest.position.x + v.x;
+    values[i + 1] = baseRest.position.y + v.y;
+    values[i + 2] = baseRest.position.z + v.z;
+  }
+}
+
+function retargetQuaternionTrack(track, sourceRest, baseRest) {
+  if (!sourceRest || !baseRest) return;
+
+  const values = track.values;
+  const sourceRestInv = sourceRest.quaternion.clone().invert();
+  const qAnim = new THREE.Quaternion();
+  const qDelta = new THREE.Quaternion();
+  const qOut = new THREE.Quaternion();
+
+  for (let i = 0; i < values.length; i += 4) {
+    qAnim.set(values[i], values[i + 1], values[i + 2], values[i + 3]).normalize();
+    qDelta.copy(sourceRestInv).multiply(qAnim).normalize();
+    qOut.copy(baseRest.quaternion).multiply(qDelta).normalize();
+
+    values[i] = qOut.x;
+    values[i + 1] = qOut.y;
+    values[i + 2] = qOut.z;
+    values[i + 3] = qOut.w;
+  }
+}
+
+function retargetScaleTrack(track, sourceRest, baseRest) {
+  if (!sourceRest || !baseRest) return;
+
+  const values = track.values;
+  for (let i = 0; i < values.length; i += 3) {
+    const sx = Math.abs(sourceRest.scale.x) > 1e-8 ? sourceRest.scale.x : 1;
+    const sy = Math.abs(sourceRest.scale.y) > 1e-8 ? sourceRest.scale.y : 1;
+    const sz = Math.abs(sourceRest.scale.z) > 1e-8 ? sourceRest.scale.z : 1;
+
+    values[i] = baseRest.scale.x * (values[i] / sx);
+    values[i + 1] = baseRest.scale.y * (values[i + 1] / sy);
+    values[i + 2] = baseRest.scale.z * (values[i + 2] / sz);
+  }
+}
+
 function countBones(object) {
   let n = 0;
   object.traverse((node) => { if (node.isBone) n += 1; });
@@ -217,15 +333,46 @@ function makeClipForBase(record, baseAsset, usedNames = null) {
 
   clip.name = exportName;
 
-  if (record.sourceRootName && baseAsset.object.name && record.sourceRootName !== baseAsset.object.name) {
-    for (const track of clip.tracks) {
-      const target = getTrackNodeName(track.name);
-      if (target === record.sourceRootName) {
-        const suffix = track.name.slice(record.sourceRootName.length);
-        track.name = baseAsset.object.name + suffix;
-      }
+  const sourceAsset = state.assets.find((asset) => asset.id === record.sourceId) || null;
+  const sourceRestPose = sourceAsset?.restPose;
+  const baseRestPose = baseAsset?.restPose;
+  const unitRatio = getAssetUnitScale(sourceAsset) / getAssetUnitScale(baseAsset);
+
+  for (const track of clip.tracks) {
+    let parsed;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      continue;
+    }
+
+    const sourceNodeName = parsed.nodeName || '';
+    let targetNodeName = sourceNodeName;
+
+    if (
+      record.sourceRootName &&
+      baseAsset.object.name &&
+      sourceNodeName === record.sourceRootName &&
+      record.sourceRootName !== baseAsset.object.name
+    ) {
+      targetNodeName = baseAsset.object.name;
+      const suffix = track.name.slice(record.sourceRootName.length);
+      track.name = baseAsset.object.name + suffix;
+    }
+
+    const sourceRest = sourceRestPose?.get(sourceNodeName);
+    const baseRest = baseRestPose?.get(targetNodeName);
+
+    if (parsed.propertyName === 'position') {
+      retargetPositionTrack(track, sourceRest, baseRest, unitRatio);
+    } else if (parsed.propertyName === 'quaternion') {
+      retargetQuaternionTrack(track, sourceRest, baseRest);
+    } else if (parsed.propertyName === 'scale') {
+      retargetScaleTrack(track, sourceRest, baseRest);
     }
   }
+
+  clip.resetDuration();
   return clip;
 }
 
@@ -606,6 +753,8 @@ async function importFiles(fileList) {
         boneCount: countBones(object),
         skinnedMeshCount: countSkinnedMeshes(object),
         nodeNames: collectNodeNames(object),
+        restPose: captureRestPose(object),
+        unitScaleFactor: Number(object.userData?.unitScaleFactor) || 1,
       });
 
       imported += 1;
@@ -738,18 +887,32 @@ function restoreBasePose() {
     state.mixer.stopAllAction();
     state.mixer.setTime(0);
   }
+
   const base = getBaseAsset();
-  if (base) {
-    base.object.traverse((node) => {
-      if (node.isSkinnedMesh && node.skeleton) node.skeleton.pose();
-    });
-    base.object.updateMatrixWorld(true);
-  }
+  if (!base) return;
+
+  applyRestPose(base.object, base.restPose);
 }
 
 function buildExportClips(base) {
   const usedNames = new Set();
   return getIncludedClips().map((record) => makeClipForBase(record, base, usedNames));
+}
+
+function buildCleanExportRoot(base, clips) {
+  restoreBasePose();
+
+  const exportRoot = SkeletonUtils.clone(base.object);
+  applyRestPose(exportRoot, base.restPose);
+  exportRoot.animations = clips;
+
+  exportRoot.traverse((node) => {
+    // Preview-only helpers must never leak into the file.
+    if (node.userData?.__previewOnly) node.visible = false;
+  });
+
+  exportRoot.updateMatrixWorld(true);
+  return exportRoot;
 }
 
 function downloadBlob(blob, filename) {
@@ -766,36 +929,47 @@ function downloadBlob(blob, filename) {
 async function exportFBX() {
   const base = getBaseAsset();
   if (!base || state.exporting) return;
+
   const clips = buildExportClips(base);
   if (!clips.length) return;
 
   state.exporting = true;
   updateExportState();
-  setStatus('Generando FBX con ' + clips.length + ' actions...', 'info');
+  setStatus('Generando FBX corregido con ' + clips.length + ' actions...', 'info');
 
-  const previousAnimations = base.object.animations;
   try {
-    restoreBasePose();
-    base.object.animations = clips;
-
+    const exportRoot = buildCleanExportRoot(base, clips);
     const exporter = new FBXExporter();
-    const bytes = await exporter.parseAsync(base.object, {
+
+    // FBXLoader conserva las unidades numéricas del archivo de origen.
+    // Por eso NO debemos imponer UnitScale=100 al preset Blender: eso vuelve
+    // a escalar malla, bind pose y traslaciones de animación de forma distinta.
+    const sourceUnitScale = getAssetUnitScale(base);
+
+    const bytes = await exporter.parseAsync(exportRoot, {
       preset: els.presetSelect.value,
+      unitScale: sourceUnitScale,
       animations: clips,
       includeAnimations: true,
       embedTextures: true,
+      bakeSpaceTransform: false,
       fps: 30,
     });
 
     const blob = new Blob([bytes], { type: 'application/octet-stream' });
     const filename = stripExt(base.file.name) + '_all_actions.fbx';
     downloadBlob(blob, filename);
-    setStatus('FBX exportado: ' + filename + ' · ' + clips.length + ' actions.', 'ok');
+
+    setStatus(
+      'FBX exportado con retarget de rest pose y unidad preservada (' +
+      sourceUnitScale + '): ' + filename + ' · ' + clips.length + ' actions.',
+      'ok'
+    );
   } catch (error) {
     console.error(error);
     setStatus('Error al exportar FBX: ' + (error?.message || error), 'error');
   } finally {
-    base.object.animations = previousAnimations;
+    restoreBasePose();
     state.exporting = false;
     updateExportState();
   }
@@ -804,6 +978,7 @@ async function exportFBX() {
 async function exportGLB() {
   const base = getBaseAsset();
   if (!base || state.exporting) return;
+
   const clips = buildExportClips(base);
   if (!clips.length) return;
 
@@ -812,9 +987,10 @@ async function exportGLB() {
   setStatus('Generando GLB de respaldo...', 'info');
 
   try {
-    restoreBasePose();
+    const exportRoot = buildCleanExportRoot(base, clips);
     const exporter = new GLTFExporter();
-    const result = await exporter.parseAsync(base.object, {
+
+    const result = await exporter.parseAsync(exportRoot, {
       binary: true,
       animations: clips,
       trs: true,
@@ -824,11 +1000,12 @@ async function exportGLB() {
 
     const filename = stripExt(base.file.name) + '_all_actions.glb';
     downloadBlob(new Blob([result], { type: 'model/gltf-binary' }), filename);
-    setStatus('GLB exportado: ' + filename + ' · ' + clips.length + ' actions.', 'ok');
+    setStatus('GLB exportado con el mismo retarget de rest pose: ' + filename + ' · ' + clips.length + ' actions.', 'ok');
   } catch (error) {
     console.error(error);
     setStatus('Error al exportar GLB: ' + (error?.message || error), 'error');
   } finally {
+    restoreBasePose();
     state.exporting = false;
     updateExportState();
   }
