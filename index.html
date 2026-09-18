@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#101216" />
+  <title>Action to Edit — FBX Animation Merger</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://esm.sh/three@0.186.0",
+      "three/addons/": "https://esm.sh/three@0.186.0/examples/jsm/",
+      "@comfyorg/fbx-exporter-three": "https://esm.sh/@comfyorg/fbx-exporter-three@1.0.1?external=three"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ACTION TO EDIT</p>
+        <h1>FBX Animation Merger</h1>
+      </div>
+      <div class="topbar-meta">
+        <span class="pill">Local · sin subir archivos</span>
+        <a class="ghost-link" href="https://github.com/acewalt/action_to_edit" target="_blank" rel="noreferrer">GitHub</a>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar left-panel">
+        <section class="panel-section">
+          <div class="section-heading">
+            <div>
+              <span class="step">01</span>
+              <h2>Importar FBX</h2>
+            </div>
+            <button id="clearAllBtn" class="text-button danger" type="button">Limpiar</button>
+          </div>
+
+          <label id="dropZone" class="drop-zone" for="fileInput">
+            <input id="fileInput" type="file" accept=".fbx" multiple />
+            <span class="drop-icon">＋</span>
+            <strong>Arrastra varios FBX aquí</strong>
+            <span>o haz clic para seleccionarlos</span>
+          </label>
+          <p class="hint">Cada archivo puede aportar una o varias acciones. Para mejores resultados, usa FBX con el mismo rig y nombres de huesos.</p>
+        </section>
+
+        <section class="panel-section grow">
+          <div class="section-heading">
+            <div>
+              <span class="step">02</span>
+              <h2>Modelo base</h2>
+            </div>
+            <span id="assetCount" class="counter">0</span>
+          </div>
+          <div id="assetList" class="asset-list empty-list">
+            <p>Importa FBX para elegir cuál conservará la malla y el esqueleto.</p>
+          </div>
+        </section>
+      </aside>
+
+      <section class="viewport-column">
+        <div class="viewport-card">
+          <div class="viewport-toolbar">
+            <div>
+              <span id="baseBadge" class="pill muted">Sin modelo base</span>
+              <span id="activeActionBadge" class="pill muted">Sin acción</span>
+            </div>
+            <div class="toolbar-actions">
+              <button id="toggleSkeletonBtn" class="icon-button" type="button" disabled>Esqueleto</button>
+              <button id="fitCameraBtn" class="icon-button" type="button" disabled>Encuadrar</button>
+            </div>
+          </div>
+
+          <div id="viewport" class="viewport">
+            <div id="viewportEmpty" class="viewport-empty">
+              <div class="empty-cube">◇</div>
+              <strong>Vista previa 3D</strong>
+              <span>Importa uno o más FBX.</span>
+            </div>
+          </div>
+
+          <div class="playback">
+            <button id="playPauseBtn" class="play-button" type="button" disabled>▶</button>
+            <div class="timeline-wrap">
+              <input id="timeline" type="range" min="0" max="1" value="0" step="0.001" disabled />
+              <div class="time-row">
+                <span id="currentTime">0.00 s</span>
+                <span id="durationTime">0.00 s</span>
+              </div>
+            </div>
+            <label class="speed-control">
+              <span>Velocidad</span>
+              <select id="speedSelect">
+                <option value="0.25">0.25×</option>
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2×</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div id="statusBar" class="status-bar" data-kind="info">
+          <span class="status-dot"></span>
+          <span id="statusText">Listo. Los FBX se procesan únicamente en tu navegador.</span>
+        </div>
+      </section>
+
+      <aside class="sidebar right-panel">
+        <section class="panel-section grow">
+          <div class="section-heading">
+            <div>
+              <span class="step">03</span>
+              <h2>Actions</h2>
+            </div>
+            <span id="actionCount" class="counter">0</span>
+          </div>
+
+          <label class="search-box">
+            <span>⌕</span>
+            <input id="actionSearch" type="search" placeholder="Buscar action..." />
+          </label>
+
+          <div id="actionList" class="action-list empty-list">
+            <p>Las animaciones encontradas aparecerán aquí. Puedes cambiarles el nombre y reproducirlas sobre el modelo base.</p>
+          </div>
+        </section>
+
+        <section class="export-card">
+          <div class="section-heading export-heading">
+            <div>
+              <span class="step">04</span>
+              <h2>Exportar</h2>
+            </div>
+          </div>
+
+          <label class="field">
+            <span>Destino FBX</span>
+            <select id="presetSelect">
+              <option value="unity" selected>Unity</option>
+              <option value="unreal">Unreal Engine</option>
+              <option value="blender">Blender</option>
+              <option value="maya">Maya</option>
+              <option value="threejs">Three.js</option>
+            </select>
+          </label>
+
+          <div class="export-summary">
+            <div><strong id="exportModelName">—</strong><span>modelo base</span></div>
+            <div><strong id="exportActionCount">0</strong><span>actions incluidas</span></div>
+          </div>
+
+          <button id="exportFbxBtn" class="primary-button" type="button" disabled>Exportar FBX con todas las actions</button>
+          <button id="exportGlbBtn" class="secondary-button" type="button" disabled>Exportar copia GLB</button>
+          <p class="hint compact">El FBX conserva el modelo base, su skin/esqueleto y las actions seleccionadas. GLB queda como formato alternativo.</p>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <template id="assetTemplate">
+    <article class="asset-card">
+      <label class="asset-main">
+        <input class="base-radio" type="radio" name="baseAsset" />
+        <span class="radio-ui"></span>
+        <span class="asset-info">
+          <strong class="asset-name"></strong>
+          <span class="asset-meta"></span>
+        </span>
+      </label>
+      <button class="asset-remove" type="button" title="Quitar FBX">×</button>
+    </article>
+  </template>
+
+  <template id="actionTemplate">
+    <article class="action-card">
+      <div class="action-top">
+        <button class="action-play" type="button" title="Reproducir">▶</button>
+        <div class="action-name-wrap">
+          <input class="action-name" type="text" aria-label="Nombre de la action" />
+          <span class="action-origin"></span>
+        </div>
+        <label class="include-toggle" title="Incluir al exportar">
+          <input class="action-include" type="checkbox" checked />
+          <span>Exportar</span>
+        </label>
+      </div>
+      <div class="action-meta">
+        <span class="duration-chip"></span>
+        <span class="tracks-chip"></span>
+        <span class="compat-chip"></span>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
