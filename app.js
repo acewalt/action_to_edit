@@ -1032,28 +1032,36 @@ function buildCleanExportRoot(base, clips) {
 }
 
 function applyFbxArmatureOrientationFix(exportRoot, preset) {
-  // Corrección global del objeto raíz solamente. Nunca modifica las curvas
-  // internas de los huesos ni las Actions.
+  // IMPORTANT:
+  // Unity's FBX importer already handles the Y-up FBX orientation correctly.
+  // Applying our Blender compensation to Unity rotates the instantiated model
+  // upside-down even though the animation preview itself is correct.
   //
-  // 1) Corrección Z confirmada visualmente por el usuario:
-  //    el FBX anterior importaba el armature con 180° en Z.
+  // Therefore orientation compensation is BLENDER-ONLY.
+  if (preset !== 'blender') {
+    exportRoot.updateMatrix();
+    exportRoot.updateMatrixWorld(true);
+    return;
+  }
+
+  // Blender-specific correction confirmed against the imported FBX:
+  // - remove the effective 180° Z flip
+  // - convert the root X result from -90° to +90° (another 180° on X)
+  //
+  // These are applied only to the exported root object. Bone curves remain
+  // untouched.
   const zCorrection = new THREE.Quaternion().setFromAxisAngle(
     new THREE.Vector3(0, 0, 1),
     Math.PI
   );
-  exportRoot.quaternion.premultiply(zCorrection);
 
-  // 2) Blender importa este FBX con X=-90°. El FBX original de referencia
-  //    queda en X=+90°. La diferencia exacta es 180° sobre X.
-  //    Esto se aplica SOLO al preset Blender; Unity conserva su orientación
-  //    hasta validarla directamente dentro de Unity.
-  if (preset === 'blender') {
-    const xCorrection = new THREE.Quaternion().setFromAxisAngle(
-      new THREE.Vector3(1, 0, 0),
-      Math.PI
-    );
-    exportRoot.quaternion.premultiply(xCorrection);
-  }
+  const xCorrection = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(1, 0, 0),
+    Math.PI
+  );
+
+  exportRoot.quaternion.premultiply(zCorrection);
+  exportRoot.quaternion.premultiply(xCorrection);
 
   exportRoot.updateMatrix();
   exportRoot.updateMatrixWorld(true);
@@ -1107,7 +1115,7 @@ async function exportFBX() {
     downloadBlob(blob, filename);
 
     setStatus(
-      'FBX exportado con retarget de rest pose, orientación de root corregida y unidad preservada (' +
+      'FBX exportado con retarget de rest pose y orientación específica del destino (' +
       sourceUnitScale + '): ' + filename + ' · ' + clips.length + ' actions.',
       'ok'
     );
