@@ -394,8 +394,8 @@ export async function buildRetargetClip({
   sourceContainer.add(sourceActionTransform);
   sourceActionTransform.add(sourceRoot);
 
-  applyRestPose(sourceRoot, sourceAsset.restPose);
-  applyRestPose(targetRoot, targetAsset.restPose);
+  restoreAssetRest(sourceRoot, sourceAsset);
+  restoreAssetRest(targetRoot, targetAsset);
 
   sourceContainer.updateMatrixWorld(true);
   targetRoot.updateMatrixWorld(true);
@@ -455,7 +455,7 @@ export async function buildRetargetClip({
       ? mergeRotationOnlyRest(originalSourceRest, sampled)
       : sampled;
   } else if (sourceRestMode === 'manual' && sourceRestOverride) {
-    applyRestPose(sourceRoot, sourceAsset.restPose);
+    restoreAssetRest(sourceRoot, sourceAsset);
     applyBonePoseOverride(sourceRoot, sourceRestOverride);
     sourceContainer.updateMatrixWorld(true);
 
@@ -465,11 +465,11 @@ export async function buildRetargetClip({
       : sampled;
   }
 
-  applyRestPose(sourceRoot, sourceAsset.restPose);
+  restoreAssetRest(sourceRoot, sourceAsset);
   sourceMixer.setTime(0);
   sourceRoot.updateMatrixWorld(true);
 
-  applyRestPose(targetRoot, targetAsset.restPose);
+  restoreAssetRest(targetRoot, targetAsset);
   const targetRest = captureBonePose(targetRoot);
 
   const sourceHeight = computeRigHeightFromPose(sourceRest);
@@ -523,14 +523,14 @@ export async function buildRetargetClip({
   for (let sampleIndex = 0; sampleIndex < sampleTimes.length; sampleIndex++) {
     const time = sampleTimes[sampleIndex];
 
-    applyRestPose(sourceRoot, sourceAsset.restPose);
+    restoreAssetRest(sourceRoot, sourceAsset);
     sourceActionTransform.position.set(0, 0, 0);
     sourceActionTransform.quaternion.identity();
     sourceActionTransform.scale.set(1, 1, 1);
     sourceMixer.setTime(time);
     sourceContainer.updateMatrixWorld(true);
 
-    applyRestPose(targetRoot, targetAsset.restPose);
+    restoreAssetRest(targetRoot, targetAsset);
     targetRoot.updateMatrixWorld(true);
 
     for (const targetName of targetOrder) {
@@ -847,17 +847,75 @@ function applyBonePoseOverride(root, override) {
   root.updateMatrixWorld(true);
 }
 
-function applyRestPose(object, restPose) {
-  if (!restPose) return;
-  object.traverse((node) => {
-    if (!node.name) return;
-    const rest = restPose.get(node.name);
-    if (!rest) return;
-    node.position.copy(rest.position);
-    node.quaternion.copy(rest.quaternion);
-    node.scale.copy(rest.scale);
+function restoreHierarchySnapshot(root, snapshot) {
+  if (!root || !Array.isArray(snapshot) || !snapshot.length) return false;
+
+  const nodes = [];
+  root.traverse((node) => nodes.push(node));
+
+  if (nodes.length !== snapshot.length) return false;
+
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    const rest = snapshot[i];
+    if (!rest) continue;
+
+    if (Array.isArray(rest.position)) node.position.fromArray(rest.position);
+    if (Array.isArray(rest.quaternion)) node.quaternion.fromArray(rest.quaternion);
+    if (Array.isArray(rest.scale)) node.scale.fromArray(rest.scale);
+    node.visible = rest.visible !== false;
+  }
+
+  root.updateMatrixWorld(true);
+
+  root.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.update();
+    }
   });
+
+  return true;
+}
+
+function restoreAssetRest(root, asset) {
+  if (!root || !asset) return;
+
+  if (restoreHierarchySnapshot(root, asset.restHierarchy)) {
+    return;
+  }
+
+  applyRestPose(root, asset.restPose);
+}
+
+function applyRestPose(object, restPose) {
+  if (!object) return;
+
+  object.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.pose();
+    }
+  });
+
+  if (restPose) {
+    object.traverse((node) => {
+      if (!node.isBone || !node.name) return;
+
+      const rest = restPose.get(node.name);
+      if (!rest) return;
+
+      node.position.copy(rest.position);
+      node.quaternion.copy(rest.quaternion);
+      node.scale.copy(rest.scale);
+    });
+  }
+
   object.updateMatrixWorld(true);
+
+  object.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.update();
+    }
+  });
 }
 
 function captureBonePose(root) {
