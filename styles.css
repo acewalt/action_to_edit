@@ -1540,3 +1540,14 @@ button { color: inherit; }
     min-height: 420px;
   }
 }
+
+
+/* Main viewport: material / solid shading */
+.shading-toggle.active {
+  border-color: #71808e;
+  background: #2a323b;
+  color: #f1f4f6;
+}
+.shading-toggle.active:hover:not(:disabled) {
+  background: #323c46;
+}
