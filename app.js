@@ -17,7 +17,7 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-28';
+} from './retargeting.js?v=20260918-29';
 
 const $ = (selector) => document.querySelector(selector);
 
