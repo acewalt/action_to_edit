@@ -1749,6 +1749,9 @@ function endBlenderAxisSnap(event) {
 
   if (!drag.moved) {
     setStatus('Alt + MMB: arrastra para elegir una vista ortográfica.', 'info');
+  } else {
+    state.axisViewReturnMode = state.freeProjectionMode;
+    updateProjectionPreferenceUi();
   }
 
   flushOrbitControls();
@@ -2491,6 +2494,35 @@ renderer.domElement.addEventListener('pointerdown', (event) => {
     event.stopImmediatePropagation();
     beginBlenderAxisSnap(event);
     return;
+  }
+
+  const isOrbitGesture =
+    !event.shiftKey &&
+    !event.ctrlKey &&
+    !event.metaKey;
+
+  // Blender-style Auto Perspective, made deterministic:
+  // an axis snap (from Gimbal OR Alt+MMB) is always orthographic, but when
+  // the user starts a normal MMB orbit we immediately restore the manually
+  // selected free-navigation projection BEFORE OrbitControls begins rotating.
+  //
+  // Shift+MMB (pan) and Ctrl+MMB (dolly) intentionally keep the snapped
+  // orthographic view.
+  if (state.axisViewActive && isOrbitGesture) {
+    const returnMode = state.freeProjectionMode;
+
+    state.axisViewActive = false;
+    state.axisViewQuaternion = null;
+    state.axisAutoSwitchPending = false;
+    state.axisViewReturnMode = returnMode;
+
+    if (returnMode === 'perspective' && camera.isOrthographicCamera) {
+      setActiveCamera('perspective', { preserveView: true });
+      setStatus('Auto Perspective: órbita libre en perspectiva.', 'info');
+    } else if (returnMode === 'orthographic' && camera.isPerspectiveCamera) {
+      setActiveCamera('orthographic', { preserveView: true });
+      setStatus('Órbita libre ortográfica.', 'info');
+    }
   }
 
   controls.mouseButtons.MIDDLE =
