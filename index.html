@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#101216" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-23" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-24" />
   <script type="importmap">
   {
     "imports": {
@@ -236,11 +236,16 @@
                     <select id="limbBoneSelect" class="motion-select"></select>
                   </label>
 
+                  <button id="toggleLimbGizmoBtn" class="gizmo-tool-button limb-gizmo-button" type="button">
+                    Editar extremidad en viewport
+                  </button>
+                  <small class="limb-hint">Gizmo combinado sobre la mano/pie. Mover usa IK de 2 huesos; rotar ajusta el efector.</small>
+
                   <label class="motion-check limb-stretch-check">
                     <input id="limbAllowStretch" type="checkbox" />
                     <span>Permitir estiramiento</span>
                   </label>
-                  <small class="limb-hint">Desactivado: conserva la distancia del hueso a su padre. Activado: permite desplazamiento libre.</small>
+                  <small class="limb-hint">Desactivado: IK conserva longitudes de brazo/pierna. Activado: la cadena puede estirarse para alcanzar objetivos fuera de rango.</small>
 
                   <div class="transform-value-group">
                     <span class="transform-value-title">Posición global</span>
@@ -393,6 +398,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-23"></script>
+  <script type="module" src="./app.js?v=20260918-24"></script>
 </body>
 </html>
