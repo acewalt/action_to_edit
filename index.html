@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#101216" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-17" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-23" />
   <script type="importmap">
   {
     "imports": {
@@ -209,6 +209,58 @@
                     <small>Vista Euler de referencia · la rotación real se compone y exporta como quaternion</small>
                   </div>
                 </div>
+
+                <div class="motion-divider"></div>
+
+                <div class="limb-offset-section">
+                  <div class="motion-control-head">
+                    <div>
+                      <label>Offset de extremidad</label>
+                      <span id="limbDetectedLabel">Detección automática</span>
+                    </div>
+                    <button id="resetLimbOffsetBtn" class="mini-reset" type="button">Reset extremidad</button>
+                  </div>
+
+                  <label class="limb-field">
+                    <span>Extremidad</span>
+                    <select id="limbSlotSelect" class="motion-select">
+                      <option value="leftHand">Mano L</option>
+                      <option value="rightHand">Mano R</option>
+                      <option value="leftFoot">Pie L</option>
+                      <option value="rightFoot">Pie R</option>
+                    </select>
+                  </label>
+
+                  <label class="limb-field">
+                    <span>Hueso</span>
+                    <select id="limbBoneSelect" class="motion-select"></select>
+                  </label>
+
+                  <label class="motion-check limb-stretch-check">
+                    <input id="limbAllowStretch" type="checkbox" />
+                    <span>Permitir estiramiento</span>
+                  </label>
+                  <small class="limb-hint">Desactivado: conserva la distancia del hueso a su padre. Activado: permite desplazamiento libre.</small>
+
+                  <div class="transform-value-group">
+                    <span class="transform-value-title">Posición global</span>
+                    <div class="offset-grid">
+                      <label><span>X</span><input id="limbOffsetX" type="number" step="0.1" value="0" /></label>
+                      <label><span>Y</span><input id="limbOffsetY" type="number" step="0.1" value="0" /></label>
+                      <label><span>Z</span><input id="limbOffsetZ" type="number" step="0.1" value="0" /></label>
+                    </div>
+                  </div>
+
+                  <div class="transform-value-group">
+                    <span class="transform-value-title">Rotación global · Quaternion interno</span>
+                    <div class="offset-grid rotation-grid">
+                      <label><span>X</span><input id="limbRotationX" type="number" step="1" value="0" /></label>
+                      <label><span>Y</span><input id="limbRotationY" type="number" step="1" value="0" /></label>
+                      <label><span>Z</span><input id="limbRotationZ" type="number" step="1" value="0" /></label>
+                    </div>
+                    <small>Los grados son una vista editable; internamente se guarda quaternion.</small>
+                  </div>
+                </div>
               </div>
             </aside>
 
@@ -341,6 +393,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-22"></script>
+  <script type="module" src="./app.js?v=20260918-23"></script>
 </body>
 </html>
