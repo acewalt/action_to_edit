@@ -65,3 +65,20 @@ Los presets BlendCap se leen en tiempo de ejecución desde su repositorio públi
 Un navegador que procesa FBX no tiene el runtime de Blender. Por eso no puede reproducir de forma idéntica las partes que dependen de bpy, depsgraph, drivers, constraints o propiedades particulares de control rigs. En concreto, el bake web actual genera animación FK sobre huesos del FBX; conserva el **FK → IK Mapping** en los presets, pero no ejecuta todavía el mismo Convert FK → IK de Rigify / Auto-Rig Pro / CloudRig que BlendCap ejecuta dentro de Blender.
 
 Para skeleton-to-skeleton FBX, Mixamo y rigs con huesos animables directamente, el retarget se realiza completamente en el navegador.
+
+
+### Redefine Rest Pose
+
+La ventana de Retargeting incluye un viewport 3D específico para corregir diferencias entre la pose de reposo del Source y la del Target antes del bake.
+
+- Muestra **Source y Target superpuestos** como referencia.
+- El Target se mantiene como referencia y el Source es editable.
+- Los huesos Source pueden seleccionarse desde el desplegable o directamente desde los puntos del esqueleto.
+- Gizmo de **rotación** y **traslación**, en espacio local o global.
+- Source, Target y meshes pueden ocultarse independientemente.
+- Auto-scale del retarget también se refleja en la comparación visual.
+- Reset Bone, Reset Pose y Encuadrar.
+- Usar esta pose como Rest guarda la pose redefinida para la combinación Source → Target sin alterar el FBX original.
+- Si Solo rotación para el Rest override está activo, se conserva la posición/escala original y la pose redefinida aporta la orientación de los huesos. Al desactivarlo también se usa la posición/escala editada.
+
+El bake utiliza esta pose manual como baseline delta-from-rest, de modo que una animación creada en T-pose puede transferirse a un rig cuyo rest pose sea A-pose, o viceversa, con mucha menos torsión inicial.
