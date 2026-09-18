@@ -269,6 +269,26 @@ button { color: inherit; }
 .search-box input {
   width: 100%; border: 0; outline: none; background: transparent; color: var(--text); padding: 8px 0; font-size: 11px;
 }
+.action-bulk-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin: 0 0 10px;
+}
+.bulk-action-button {
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  background: #1a1f25;
+  color: var(--soft);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font-size: 9px;
+  cursor: pointer;
+}
+.bulk-action-button:hover {
+  background: #242b34;
+  color: var(--text);
+}
 .action-list { padding-right: 2px; }
 .action-card {
   border: 1px solid var(--line);
@@ -372,6 +392,7 @@ button { color: inherit; }
   .viewport-toolbar > div:first-child { flex-direction: column; align-items: flex-start; }
   .playback { grid-template-columns: 34px 1fr; }
   .speed-control { grid-column: 1 / -1; justify-content: flex-end; }
+  .action-bulk-controls { grid-template-columns: 1fr; }
   .action-top { grid-template-columns: 30px minmax(0,1fr) auto; }
   .action-rename { grid-column: 2; justify-self: start; }
   .include-toggle { grid-column: 3; grid-row: 1 / span 2; }
