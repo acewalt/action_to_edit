@@ -72,14 +72,20 @@ export class RestPoseEditor {
         this.sourceRoot?.updateMatrixWorld(true);
         this.updateSkeletonLines();
         this.updateMarkers();
+        this.updateIkHandles(true);
         this.onPoseChanged?.(this.capturePose());
       }
     });
 
     this.transform.addEventListener('objectChange', () => {
+      if (this.activeIkHandle && this.transform.object === this.activeIkHandle) {
+        this.solveIkHandle(this.activeIkHandle);
+      }
+
       this.sourceRoot?.updateMatrixWorld(true);
       this.updateSkeletonLines();
       this.updateMarkers();
+      this.updateIkHandles(false);
     });
 
     this.sourceGroup = new THREE.Group();
@@ -94,11 +100,15 @@ export class RestPoseEditor {
     this.poseHandleGroup = new THREE.Group();
     this.poseHandleGroup.name = '__RestPoseLargeControls__';
 
+    this.ikHandleGroup = new THREE.Group();
+    this.ikHandleGroup.name = '__RestPoseFourPointIK__';
+
     this.scene.add(
       this.sourceGroup,
       this.targetGroup,
       this.markerGroup,
-      this.poseHandleGroup
+      this.poseHandleGroup,
+      this.ikHandleGroup
     );
 
     const hemi = new THREE.HemisphereLight(0xffffff, 0x1c222a, 2.0);
@@ -125,12 +135,16 @@ export class RestPoseEditor {
     this.sourceBones = new Map();
     this.targetBones = new Map();
     this.sourceRestWorldQuaternions = new Map();
+    this.ikHandles = [];
+    this.activeIkHandle = null;
 
     this.sourceSkeletonView = null;
     this.targetSkeletonView = null;
 
     this.markers = [];
     this.poseHandles = [];
+    this.ikHandles = [];
+    this.activeIkHandle = null;
     this.selectedBoneName = '';
 
     this.sourceVisible = true;
@@ -420,6 +434,7 @@ export class RestPoseEditor {
 
     this.buildMarkers();
     this.buildPoseHandles();
+    this.buildDefaultIkHandles();
 
     this.setVisibility({
       source: this.sourceVisible,
@@ -440,8 +455,10 @@ export class RestPoseEditor {
 
   clearDisplay() {
     this.transform.detach();
+    this.activeIkHandle = null;
     this.clearMarkers();
     this.clearPoseHandles();
+    this.clearIkHandles();
 
     if (this.sourceSkeletonView?.line) {
       this.scene.remove(this.sourceSkeletonView.line);
@@ -500,10 +517,8 @@ export class RestPoseEditor {
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
 
-    // IMPORTANT: Auto-scale to Target belongs to the RETARGET BAKE. It should
-    // not visually rescale the characters in Redefine Rest Pose. This viewport
-    // preserves each FBX's real imported proportions so a child rig remains
-    // smaller than an adult rig, exactly like in Blender.
+    // Redefine Rest Pose is a comparison viewport, not the bake. Keep each
+    // FBX at its real imported scale and place BOTH rigs on the same origin.
     this.displayScaleRatio = 1;
 
     const sourceSet = chooseDisplayBoneSet(this.sourceBones);
@@ -514,31 +529,21 @@ export class RestPoseEditor {
 
     if (!sourceBox || !targetBox) return;
 
-    // Put both rigs upright on the same floor and side-by-side. This keeps
-    // their original scale while making the rest poses easy to compare.
-    this.sourceGroup.position.y -= sourceBox.min.y;
-    this.targetGroup.position.y -= targetBox.min.y;
+    const centerRigOnOrigin = (group, box) => {
+      const centerX = (box.min.x + box.max.x) * 0.5;
+      const centerZ = (box.min.z + box.max.z) * 0.5;
 
-    this.sourceGroup.updateMatrixWorld(true);
-    this.targetGroup.updateMatrixWorld(true);
+      group.position.x -= centerX;
+      group.position.z -= centerZ;
+      group.position.y -= box.min.y;
+      group.updateMatrixWorld(true);
+    };
 
-    sourceBox = boxFromBones(this.sourceBones, sourceSet);
-    targetBox = boxFromBones(this.targetBones, targetSet);
+    centerRigOnOrigin(this.sourceGroup, sourceBox);
+    centerRigOnOrigin(this.targetGroup, targetBox);
 
-    const sourceHeight = Math.max(sourceBox.max.y - sourceBox.min.y, 0.001);
-    const targetHeight = Math.max(targetBox.max.y - targetBox.min.y, 0.001);
-    const maxHeight = Math.max(sourceHeight, targetHeight);
-
-    const gap = maxHeight * 0.18;
-
-    // Source on the left, Target on the right.
-    this.sourceGroup.position.x += (-gap * 0.5) - sourceBox.max.x;
-    this.targetGroup.position.x += ( gap * 0.5) - targetBox.min.x;
-
-    // Center both rigs on depth so they are directly comparable from front view.
-    this.sourceGroup.position.z -= (sourceBox.min.z + sourceBox.max.z) * 0.5;
-    this.targetGroup.position.z -= (targetBox.min.z + targetBox.max.z) * 0.5;
-
+    // Both now share X=0, Z=0 and ground Y=0, matching the Blender comparison
+    // workflow. Their different body sizes remain intact.
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
   }
@@ -550,6 +555,7 @@ export class RestPoseEditor {
     if (!this.sourceRoot || !this.targetRoot) return;
     this.updateSkeletonLines();
     this.updateMarkers();
+    this.updateIkHandles(true);
   }
 
   getSourceBoneNames() {
@@ -565,6 +571,7 @@ export class RestPoseEditor {
     this.targetGroup.visible = this.targetVisible;
     this.markerGroup.visible = this.sourceVisible;
     this.poseHandleGroup.visible = this.sourceVisible;
+    this.ikHandleGroup.visible = this.sourceVisible;
 
     setMeshVisibility(this.sourceRoot, this.meshesVisible);
     setMeshVisibility(this.targetRoot, this.meshesVisible);
@@ -596,6 +603,7 @@ export class RestPoseEditor {
     const bone = this.sourceBones.get(name);
     if (!bone) return false;
 
+    this.activeIkHandle = null;
     this.selectedBoneName = name;
     this.transform.attach(bone);
     this.transform.visible = this.sourceVisible;
@@ -641,6 +649,7 @@ export class RestPoseEditor {
     this.sourceRoot.updateMatrixWorld(true);
     this.updateSkeletonLines();
     this.updateMarkers();
+    this.updateIkHandles(true);
     this.onPoseChanged?.(this.capturePose());
   }
 
@@ -652,6 +661,7 @@ export class RestPoseEditor {
 
     this.updateSkeletonLines();
     this.updateMarkers();
+    this.updateIkHandles(true);
 
     if (this.selectedBoneName) {
       this.selectBone(this.selectedBoneName);
@@ -745,6 +755,7 @@ export class RestPoseEditor {
     this.sourceRoot.updateMatrixWorld(true);
     this.updateSkeletonLines();
     this.updateMarkers();
+    this.updateIkHandles(true);
 
     this.onPoseChanged?.(this.capturePose());
 
@@ -781,6 +792,7 @@ export class RestPoseEditor {
     this.sourceRoot.updateMatrixWorld(true);
     this.updateSkeletonLines();
     this.updateMarkers();
+    this.updateIkHandles(true);
 
     if (this.selectedBoneName) {
       this.selectBone(this.selectedBoneName);
@@ -880,6 +892,232 @@ export class RestPoseEditor {
     this.updateMarkers();
   }
 
+  buildDefaultIkHandles() {
+    this.clearIkHandles();
+    if (!this.sourceBones.size) return;
+
+    const sourceHeight = Math.max(
+      computeBoneHeight(
+        this.sourceBones,
+        chooseDisplayBoneSet(this.sourceBones)
+      ),
+      0.1
+    );
+
+    const radius = THREE.MathUtils.clamp(
+      sourceHeight * 0.026,
+      0.018,
+      0.075
+    );
+
+    const geometry = new THREE.SphereGeometry(radius, 18, 14);
+    this.ikHandleGeometry = geometry;
+
+    const specs = [
+      ['leftHand', 'lefthand', 'leftforearm', 'leftupperarm'],
+      ['rightHand', 'righthand', 'rightforearm', 'rightupperarm'],
+      ['leftFoot', 'leftfoot', 'leftshin', 'leftthigh'],
+      ['rightFoot', 'rightfoot', 'rightshin', 'rightthigh'],
+    ];
+
+    for (const [id, endSemantic, lowerSemantic, upperSemantic] of specs) {
+      const endBone = findBestBoneBySemantic(this.sourceBones, endSemantic);
+      const lowerBone = findAncestorBySemantic(endBone, lowerSemantic);
+      const upperBone = findAncestorBySemantic(lowerBone, upperSemantic);
+
+      if (!endBone || !lowerBone || !upperBone) continue;
+
+      const material = new THREE.MeshBasicMaterial({
+        color: /left/i.test(id) ? 0x42c8ff : 0xff7b42,
+        transparent: true,
+        opacity: 0.98,
+        depthTest: false,
+      });
+
+      const handle = new THREE.Mesh(geometry, material);
+      handle.renderOrder = 120;
+      handle.userData.kind = 'ik-endpoint';
+      handle.userData.id = id;
+      handle.userData.boneName = endBone.name;
+      handle.userData.endBone = endBone;
+      handle.userData.lowerBone = lowerBone;
+      handle.userData.upperBone = upperBone;
+      handle.userData.semantic = endSemantic;
+
+      this.ikHandleGroup.add(handle);
+      this.ikHandles.push(handle);
+    }
+
+    this.updateIkHandles(true);
+  }
+
+  clearIkHandles() {
+    if (this.activeIkHandle) {
+      this.activeIkHandle = null;
+    }
+
+    for (const handle of this.ikHandles || []) {
+      handle.material?.dispose?.();
+    }
+
+    this.ikHandles = [];
+    this.ikHandleGroup?.clear();
+
+    this.ikHandleGeometry?.dispose?.();
+    this.ikHandleGeometry = null;
+  }
+
+  updateIkHandles(force = false) {
+    const world = new THREE.Vector3();
+
+    for (const handle of this.ikHandles || []) {
+      if (
+        !force &&
+        this.transformDragging &&
+        this.activeIkHandle === handle
+      ) {
+        continue;
+      }
+
+      const endBone = handle.userData.endBone;
+      if (!endBone) continue;
+
+      endBone.getWorldPosition(world);
+      handle.position.copy(world);
+    }
+  }
+
+  selectIkHandle(handle) {
+    if (!handle?.userData?.endBone) return false;
+
+    this.activeIkHandle = handle;
+    this.selectedBoneName = handle.userData.endBone.name;
+
+    // The four default points are world-space IK translation targets.
+    this.transform.attach(handle);
+    this.transform.setMode('translate');
+    this.transform.setSpace('world');
+    this.transform.visible = this.sourceVisible;
+
+    for (const marker of this.markers) {
+      marker.material.opacity =
+        marker.userData.boneName === this.selectedBoneName
+          ? 1
+          : 0.5;
+    }
+
+    for (const item of this.ikHandles) {
+      item.scale.setScalar(item === handle ? 1.35 : 1);
+    }
+
+    this.onBoneSelected?.(this.selectedBoneName);
+    return true;
+  }
+
+  solveIkHandle(handle) {
+    const upper = handle?.userData?.upperBone;
+    const lower = handle?.userData?.lowerBone;
+    const end = handle?.userData?.endBone;
+
+    if (!upper || !lower || !end) return;
+
+    this.sourceRoot?.updateMatrixWorld(true);
+
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+
+    upper.getWorldPosition(a);
+    lower.getWorldPosition(b);
+    end.getWorldPosition(c);
+
+    const target = handle.position.clone();
+
+    const ab = b.clone().sub(a);
+    const bc = c.clone().sub(b);
+
+    const l1 = Math.max(ab.length(), 1e-6);
+    const l2 = Math.max(bc.length(), 1e-6);
+
+    const toTarget = target.clone().sub(a);
+    let distance = toTarget.length();
+
+    if (distance < 1e-7) return;
+
+    const minReach = Math.abs(l1 - l2) + 1e-5;
+    const maxReach = Math.max(l1 + l2 - 1e-5, minReach);
+    distance = THREE.MathUtils.clamp(distance, minReach, maxReach);
+
+    const direction = toTarget.normalize();
+    const clampedTarget = a.clone().addScaledVector(direction, distance);
+
+    let planeNormal = ab.clone().cross(bc);
+
+    if (planeNormal.lengthSq() < 1e-10) {
+      const cameraForward = new THREE.Vector3(0, 0, -1)
+        .applyQuaternion(this.camera.quaternion);
+
+      planeNormal = direction.clone().cross(cameraForward);
+
+      if (planeNormal.lengthSq() < 1e-10) {
+        planeNormal = direction.clone().cross(
+          new THREE.Vector3(0, 1, 0)
+        );
+      }
+    }
+
+    planeNormal.normalize();
+
+    let bendDirection = planeNormal
+      .clone()
+      .cross(direction)
+      .normalize();
+
+    const projection = a.clone().addScaledVector(
+      direction,
+      b.clone().sub(a).dot(direction)
+    );
+
+    if (b.clone().sub(projection).dot(bendDirection) < 0) {
+      bendDirection.negate();
+    }
+
+    const along =
+      (l1 * l1 - l2 * l2 + distance * distance) /
+      (2 * distance);
+
+    const height = Math.sqrt(
+      Math.max(l1 * l1 - along * along, 0)
+    );
+
+    const desiredB = a
+      .clone()
+      .addScaledVector(direction, along)
+      .addScaledVector(bendDirection, height);
+
+    rotateBoneWorldVector(
+      upper,
+      b.clone().sub(a),
+      desiredB.clone().sub(a)
+    );
+
+    this.sourceRoot?.updateMatrixWorld(true);
+
+    const b2 = new THREE.Vector3();
+    const c2 = new THREE.Vector3();
+
+    lower.getWorldPosition(b2);
+    end.getWorldPosition(c2);
+
+    rotateBoneWorldVector(
+      lower,
+      c2.clone().sub(b2),
+      clampedTarget.clone().sub(b2)
+    );
+
+    this.sourceRoot?.updateMatrixWorld(true);
+  }
+
   clearMarkers() {
     for (const marker of this.markers) {
       marker.material?.dispose?.();
@@ -924,6 +1162,8 @@ export class RestPoseEditor {
       // large, easy to see and easy to click from any viewing angle.
       handle.quaternion.copy(this.camera.quaternion);
     }
+
+    this.updateIkHandles(false);
   }
 
   updateSkeletonLines() {
@@ -943,6 +1183,16 @@ export class RestPoseEditor {
       -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.pointer, this.camera);
+
+    const ikHits = this.raycaster.intersectObjects(
+      this.ikHandles,
+      false
+    );
+
+    if (ikHits.length) {
+      this.selectIkHandle(ikHits[0].object);
+      return;
+    }
 
     const pickables = [
       ...this.poseHandles,
@@ -1377,6 +1627,7 @@ export class RestPoseEditor {
     this.controls.update();
     this.updateSkeletonLines();
     this.updateMarkers();
+    this.updateIkHandles(true);
     this.updateNavigationGizmo();
 
     this.renderer.render(this.scene, this.camera);
@@ -1490,15 +1741,34 @@ function restoreHierarchySnapshot(root, snapshot) {
 function restoreAssetRest(root, asset) {
   if (!root || !asset) return;
 
-  // New imports use an exact traversal snapshot captured immediately after
-  // FBXLoader parsing. This restores object/root rotations and scales as well
-  // as bones, and avoids collisions from duplicate control names.
-  if (restoreHierarchySnapshot(root, asset.restHierarchy)) {
-    return;
+  // Restore the imported OBJECT hierarchy first (root/armature rotations,
+  // scales, offsets), then force the skeleton from inverse bind matrices.
+  // This is the real static bind/rest pose and cannot inherit the Action that
+  // is currently playing in the main viewport.
+  restoreHierarchySnapshot(root, asset.restHierarchy);
+  forceBindPose(root);
+}
+
+function forceBindPose(root) {
+  if (!root) return;
+
+  const skeletons = new Set();
+
+  root.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      skeletons.add(node.skeleton);
+    }
+  });
+
+  for (const skeleton of skeletons) {
+    skeleton.pose();
   }
 
-  // Backward-compatible fallback for assets imported before v39.
-  applyRestPose(root, asset.restPose);
+  root.updateMatrixWorld(true);
+
+  for (const skeleton of skeletons) {
+    skeleton.update();
+  }
 }
 
 function applyRestPose(object, restPose) {
@@ -2096,6 +2366,91 @@ function findOppositeBoneName(name, names) {
   }
 
   return '';
+}
+
+function findBestBoneBySemantic(bones, semantic) {
+  if (!bones?.size) return null;
+
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (const [name, bone] of bones) {
+    if (semanticNameForHandle(name) !== semantic) continue;
+
+    const n = String(name || '').toLowerCase();
+    let score = 0;
+
+    if (/^mixamorig/.test(n)) score += 100;
+    if (/^def[-_:]/.test(n)) score += 90;
+    if (/^fk[-_:]/.test(n)) score += 80;
+
+    if (/(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|ik-|hng|p-str|str-|twist|tweak|roll)/i.test(n)) {
+      score -= 100;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = bone;
+    }
+  }
+
+  return best;
+}
+
+function findAncestorBySemantic(startBone, semantic) {
+  let node = startBone?.parent || null;
+
+  while (node) {
+    if (
+      node.isBone &&
+      semanticNameForHandle(node.name) === semantic
+    ) {
+      return node;
+    }
+
+    node = node.parent;
+  }
+
+  return null;
+}
+
+function rotateBoneWorldVector(bone, fromVector, toVector) {
+  if (!bone) return;
+
+  const from = fromVector.clone().normalize();
+  const to = toVector.clone().normalize();
+
+  if (
+    from.lengthSq() < 1e-10 ||
+    to.lengthSq() < 1e-10
+  ) {
+    return;
+  }
+
+  const delta = new THREE.Quaternion()
+    .setFromUnitVectors(from, to)
+    .normalize();
+
+  const currentWorld = new THREE.Quaternion();
+  bone.getWorldQuaternion(currentWorld);
+
+  const desiredWorld = delta
+    .clone()
+    .multiply(currentWorld)
+    .normalize();
+
+  const parentWorld = new THREE.Quaternion();
+
+  if (bone.parent) {
+    bone.parent.getWorldQuaternion(parentWorld);
+  }
+
+  bone.quaternion.copy(
+    parentWorld
+      .invert()
+      .multiply(desiredWorld)
+      .normalize()
+  );
 }
 
 function axisViewDefinition(axisView) {
