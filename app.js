@@ -4433,7 +4433,7 @@ function saveCustomRetargetPresets(data) {
 }
 
 function currentRetargetMapData(name = 'Custom Retarget Map') {
-  return normalizePresetData({
+  return {
     name,
     version: 1,
     target_kind: state.retargetPresetData?.target_kind || 'generic',
@@ -4443,19 +4443,29 @@ function currentRetargetMapData(name = 'Custom Retarget Map') {
     use_world_location: els.retargetWorldLocation.checked,
     face_head_source: els.retargetHeadSource.value.trim(),
     face_head_target: els.retargetHeadTarget.value.trim(),
-    pairs: state.retargetPairs.map((pair) => ({
-      source: pair.source,
-      target: pair.target,
-      channels: pair.channels,
-      axes: pair.axes,
-      influence: pair.influence,
-      loc_space: pair.anchor ? 'HEAD_LOCAL' : (pair.loc_space || 'BASIS'),
-      anchor: pair.anchor,
-      loc_scale: pair.loc_scale,
-    })),
-    ik_chains: state.retargetIkChains,
-    custom_ik_sources: state.retargetCustomIkSources,
-  }, name);
+    pairs: state.retargetPairs.map((pair) => {
+      const entry = {
+        source: pair.source,
+        target: pair.target,
+        channels: pair.channels,
+        influence: pair.influence,
+      };
+
+      if (pair.channels === 'LOC' || pair.channels === 'LOC_ROT') {
+        entry.axes = pair.axes || 'XYZ';
+        if (pair.anchor || pair.loc_space === 'HEAD_LOCAL') {
+          entry.loc_space = 'head_local';
+        }
+        if (Math.abs((Number(pair.loc_scale) || 1) - 1) > 1e-6) {
+          entry.loc_scale = Number(pair.loc_scale) || 1;
+        }
+      }
+
+      return entry;
+    }),
+    ik_chains: state.retargetIkChains.map((row) => ({ ...row })),
+    custom_ik_sources: { ...state.retargetCustomIkSources },
+  };
 }
 
 function initializeRetargetPresetOptions() {
@@ -5180,11 +5190,36 @@ async function applyCurrentRetargeting() {
     const preparedSourceClip = sourceRecord.clip.clone();
     preparedSourceClip.name = sourceRecord.name || sourceRecord.clip.name;
 
-    // Reuse every Action edit the user already made in the main editor:
-    // mirror, overdrive, arm-space, limb IK, Action Transform and trim.
+    const sourceEdit = ensureActionEdit(sourceRecord);
+
+    // Bake pose/time edits into the source motion, but keep Action Transform
+    // OUTSIDE the skeleton retarget. A whole-rig rotation must not be injected
+    // into every mapped bone or it compounds down the hierarchy.
+    const bakeEdit = {
+      ...sourceEdit,
+      rootOffset: { x: 0, y: 0, z: 0 },
+      rootQuaternion: { x: 0, y: 0, z: 0, w: 1 },
+      limbOffsets: Object.fromEntries(
+        Object.entries(ensureLimbOffsets(sourceEdit)).map(([key, value]) => [
+          key,
+          {
+            ...value,
+            position: { ...value.position },
+            quaternion: { ...value.quaternion },
+          },
+        ])
+      ),
+    };
+
+    const sourceRecordForBake = {
+      ...sourceRecord,
+      edit: bakeEdit,
+    };
+
+    // Mirror, overdrive, arm-space, limb IK and trim are baked here.
     applyActionEditPipeline(
       preparedSourceClip,
-      sourceRecord,
+      sourceRecordForBake,
       sourceAsset
     );
 
@@ -5230,7 +5265,23 @@ async function applyCurrentRetargeting() {
       clip,
       empty: false,
       include: true,
-      edit: defaultActionEdit(),
+      edit: (() => {
+        const outputEdit = defaultActionEdit();
+        const sourceEdit = ensureActionEdit(sourceRecord);
+        const rootScale = els.retargetAutoScale.checked
+          ? (Number(result.report.scaleRatio) || 1)
+          : 1;
+
+        outputEdit.rootOffset = {
+          x: (Number(sourceEdit.rootOffset?.x) || 0) * rootScale,
+          y: (Number(sourceEdit.rootOffset?.y) || 0) * rootScale,
+          z: (Number(sourceEdit.rootOffset?.z) || 0) * rootScale,
+        };
+        outputEdit.rootQuaternion = {
+          ...sourceEdit.rootQuaternion,
+        };
+        return outputEdit;
+      })(),
       retargetInfo: {
         sourceAssetId: sourceAsset.id,
         targetAssetId: targetAsset.id,
