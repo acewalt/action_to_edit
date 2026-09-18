@@ -408,8 +408,13 @@ export async function buildRetargetClip({
   // BlendCap runs inside Blender, so mapping an FK control works because the
   // target constraint/driver stack propagates that control to the deform
   // skeleton. FBX + Three.js does NOT carry/evaluate that Blender rig graph.
-  // Resolve browser retarget outputs to bones that actually influence skin.
-  const weightedTargetBones = collectWeightedSkinBoneNames(targetRoot);
+  //
+  // A bone can still influence the mesh WITHOUT direct skin weights when it is
+  // an ancestor of weighted bones (root/pelvis carrier). Keep those hierarchy
+  // carriers; only redirect controls that are outside the exported deform tree.
+  const targetSkinInfo = collectTargetSkinHierarchy(targetRoot);
+  const weightedTargetBones = targetSkinInfo.weighted;
+  const influentialTargetBones = targetSkinInfo.influential;
 
   const invalid = [];
   const runtimePairs = [];
@@ -432,6 +437,7 @@ export async function buildRetargetClip({
       pair,
       targetBones,
       weightedTargetBones,
+      influentialTargetBones,
     });
 
     runtimePairs.push({
@@ -687,8 +693,17 @@ export async function buildRetargetClip({
               // browser equivalent of BlendCap's world-component BASIS bake.
               worldContribution
                 .copy(sourceBone.position)
-                .sub(sourceRestEntry.localPosition)
-                .applyQuaternion(sourceRestEntry.parentWorldQuaternion)
+                .sub(sourceRestEntry.localPosition);
+
+              const sourceParentLinear =
+                new THREE.Matrix3()
+                  .setFromMatrix4(
+                    sourceRestEntry.parentWorldMatrix ||
+                    new THREE.Matrix4()
+                  );
+
+              worldContribution
+                .applyMatrix3(sourceParentLinear)
                 .multiplyScalar(scaleRatio * pairScale);
             }
 
@@ -721,15 +736,18 @@ export async function buildRetargetClip({
       }
 
       if (wroteWorldLocation && worldLocationAccum) {
-        const parentRestInv =
-          targetRestEntry.parentWorldQuaternion
-            .clone()
+        const parentLinearInv =
+          new THREE.Matrix3()
+            .setFromMatrix4(
+              targetRestEntry.parentWorldMatrix ||
+              new THREE.Matrix4()
+            )
             .invert();
 
         const localDelta =
           worldLocationAccum
             .clone()
-            .applyQuaternion(parentRestInv);
+            .applyMatrix3(parentLinearInv);
 
         nextLocalPosition =
           targetRestEntry.localPosition
@@ -814,6 +832,70 @@ export async function buildRetargetClip({
     throw new Error('El retarget no produjo tracks.');
   }
 
+  // STRICT TARGET REST BASELINE
+  // --------------------------------
+  // A retargeted Action must be independent from whichever Action the target
+  // happened to play before it. Three.js clips are sparse: an unkeyed channel
+  // can otherwise remain at a stale value until another clip writes it.
+  //
+  // Bake constant rest tracks for every bone that can influence the skin
+  // (directly weighted OR an ancestor carrier). Animated channels keep the
+  // retarget data; missing channels are forced to the imported target rest.
+  const keyed = new Map();
+
+  for (const track of tracks) {
+    let parsed = null;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      parsed = null;
+    }
+
+    if (!parsed?.nodeName || !parsed?.propertyName) continue;
+
+    if (!keyed.has(parsed.nodeName)) {
+      keyed.set(parsed.nodeName, new Set());
+    }
+
+    keyed.get(parsed.nodeName).add(parsed.propertyName);
+  }
+
+  const baselineTimes = [0, duration];
+
+  for (const boneName of influentialTargetBones) {
+    const rest = targetRest.get(boneName);
+    if (!rest) continue;
+
+    const channels = keyed.get(boneName) || new Set();
+
+    if (!channels.has('position')) {
+      const p = rest.localPosition;
+      tracks.push(new THREE.VectorKeyframeTrack(
+        boneName + '.position',
+        baselineTimes,
+        [p.x, p.y, p.z, p.x, p.y, p.z]
+      ));
+    }
+
+    if (!channels.has('quaternion')) {
+      const q = rest.localQuaternion.clone().normalize();
+      tracks.push(new THREE.QuaternionKeyframeTrack(
+        boneName + '.quaternion',
+        baselineTimes,
+        [q.x, q.y, q.z, q.w, q.x, q.y, q.z, q.w]
+      ));
+    }
+
+    if (!channels.has('scale')) {
+      const sc = rest.localScale;
+      tracks.push(new THREE.VectorKeyframeTrack(
+        boneName + '.scale',
+        baselineTimes,
+        [sc.x, sc.y, sc.z, sc.x, sc.y, sc.z]
+      ));
+    }
+  }
+
   const clip = new THREE.AnimationClip(clipName, duration, tracks);
   clip.resetDuration();
 
@@ -836,6 +918,8 @@ export async function buildRetargetClip({
           bakedTarget: pair.targetName,
         })),
       weightedTargetBoneCount: weightedTargetBones.size,
+      influentialTargetBoneCount: influentialTargetBones.size,
+      restBaselineBoneCount: influentialTargetBones.size,
     },
   };
 }
@@ -1027,6 +1111,10 @@ function captureBonePose(root) {
     const parentWorldQuaternion = new THREE.Quaternion();
     if (node.parent) node.parent.getWorldQuaternion(parentWorldQuaternion);
 
+    const parentWorldMatrix =
+      node.parent?.matrixWorld?.clone() ||
+      new THREE.Matrix4();
+
     map.set(node.name, {
       name: node.name,
       localPosition: node.position.clone(),
@@ -1037,6 +1125,7 @@ function captureBonePose(root) {
       worldScale,
       worldMatrix: node.matrixWorld.clone(),
       parentWorldQuaternion,
+      parentWorldMatrix,
       parentName: node.parent?.name || '',
     });
   });
@@ -1055,6 +1144,9 @@ function clonePoseEntry(entry) {
     worldScale: entry.worldScale.clone(),
     worldMatrix: entry.worldMatrix.clone(),
     parentWorldQuaternion: entry.parentWorldQuaternion.clone(),
+    parentWorldMatrix:
+      entry.parentWorldMatrix?.clone() ||
+      new THREE.Matrix4(),
     parentName: entry.parentName,
   };
 }
@@ -1077,11 +1169,16 @@ function boneMap(root) {
   return map;
 }
 
-function collectWeightedSkinBoneNames(root) {
+function collectTargetSkinHierarchy(root) {
   const weighted = new Set();
   const fallback = new Set();
+  const allBones = new Map();
 
   root?.traverse((node) => {
+    if (node.isBone && node.name && !allBones.has(node.name)) {
+      allBones.set(node.name, node);
+    }
+
     if (!node.isSkinnedMesh || !node.skeleton) return;
 
     const bones = node.skeleton.bones || [];
@@ -1108,14 +1205,45 @@ function collectWeightedSkinBoneNames(root) {
     }
   });
 
-  return weighted.size ? weighted : fallback;
+  if (!weighted.size) {
+    for (const name of fallback) weighted.add(name);
+  }
+
+  const influential = new Set(weighted);
+
+  // Non-weighted root/pelvis/structural bones still matter when weighted
+  // descendants inherit from them. These are valid animation carriers in FBX.
+  for (const name of weighted) {
+    let bone = allBones.get(name) || null;
+    while (bone) {
+      if (bone.isBone && bone.name) influential.add(bone.name);
+      bone = bone.parent?.isBone ? bone.parent : null;
+    }
+  }
+
+  return { weighted, influential };
 }
+
+function countWeightedDescendants(bone, weightedTargetBones) {
+  if (!bone) return 0;
+
+  let count = weightedTargetBones.has(bone.name) ? 1 : 0;
+  bone.traverse?.((node) => {
+    if (node !== bone && node.isBone && weightedTargetBones.has(node.name)) {
+      count += 1;
+    }
+  });
+
+  return count;
+}
+
 
 function resolveBrowserBakeTarget({
   requestedName,
   pair,
   targetBones,
   weightedTargetBones,
+  influentialTargetBones,
 }) {
   if (
     !requestedName ||
@@ -1125,8 +1253,10 @@ function resolveBrowserBakeTarget({
     return requestedName;
   }
 
-  // If the preset already points at a real skinning bone, keep it.
-  if (weightedTargetBones.has(requestedName)) {
+  // Keep real deform bones AND non-weighted hierarchy carriers such as
+  // exported root/pelvis bones. They affect weighted descendants directly in
+  // FBX and do not need Blender constraints to work.
+  if (influentialTargetBones?.has(requestedName)) {
     return requestedName;
   }
 
@@ -1154,7 +1284,11 @@ function resolveBrowserBakeTarget({
       wantedSemantic === 'hips')
   ) {
     const motionRoot =
-      findWeightedMotionRoot(targetBones, weightedTargetBones);
+      findTargetMotionCarrier(
+        targetBones,
+        weightedTargetBones,
+        influentialTargetBones
+      );
 
     if (motionRoot) return motionRoot;
   }
@@ -1214,32 +1348,54 @@ function resolveBrowserBakeTarget({
   return candidates[0]?.name || requestedName;
 }
 
-function findWeightedMotionRoot(targetBones, weightedTargetBones) {
-  const weighted = [...weightedTargetBones]
+function findTargetMotionCarrier(
+  targetBones,
+  weightedTargetBones,
+  influentialTargetBones
+) {
+  const candidates = [...(influentialTargetBones || [])]
     .map((name) => targetBones.get(name))
     .filter(Boolean);
 
-  const hips = weighted.filter((bone) => {
+  if (!candidates.length) return '';
+
+  const scored = candidates.map((bone) => {
     const semantic = semanticBoneKey(bone.name);
-    return semantic === 'hips' || semantic === 'root';
+    const lower = bone.name.toLowerCase();
+    const coverage = countWeightedDescendants(
+      bone,
+      weightedTargetBones
+    );
+
+    let score = coverage * 1000;
+
+    if (semantic === 'root') score += 350;
+    if (semantic === 'hips') score += 300;
+    if (/pelvis|hips/.test(lower)) score += 220;
+    if (/root|master/.test(lower)) score += 180;
+
+    if (
+      /(finger|thumb|index|middle|ring|pinky|toe|hand|foot|forearm|upperarm|thigh|shin|knee)/
+        .test(lower)
+    ) {
+      score -= 5000;
+    }
+
+    // Prefer shallower carriers when coverage is equal.
+    score -= boneDepth(bone) * 10;
+
+    return { name: bone.name, score, coverage };
   });
 
-  const pool = hips.length ? hips : weighted;
+  scored.sort((a, b) =>
+    b.score - a.score ||
+    b.coverage - a.coverage ||
+    String(a.name).localeCompare(String(b.name))
+  );
 
-  pool.sort((a, b) => {
-    const aScore =
-      (semanticBoneKey(a.name) === 'hips' ? -100 : 0) +
-      boneDepth(a);
-
-    const bScore =
-      (semanticBoneKey(b.name) === 'hips' ? -100 : 0) +
-      boneDepth(b);
-
-    return aScore - bScore;
-  });
-
-  return pool[0]?.name || '';
+  return scored[0]?.name || '';
 }
+
 
 function blenderAxesToThreeWorld(value) {
   // BlendCap presets are authored in Blender world axes (Z-up):
