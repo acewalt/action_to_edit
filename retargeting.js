@@ -388,26 +388,54 @@ export async function buildRetargetClip({
   const sourceRoot = SkeletonUtils.clone(sourceAsset.object);
   const targetRoot = SkeletonUtils.clone(targetAsset.object);
 
-  // Mirror Action to Edit's preview hierarchy so identity Action Transform
-  // tracks bind cleanly. Non-identity whole-rig offsets are intentionally
-  // carried separately by app.js and are NOT injected into every bone.
+  // Mirror Action to Edit's preview hierarchy, but put both rigs inside an
+  // explicit armature-alignment layer. Redefine Rest Pose already shows both
+  // rigs in this upright humanoid frame; the actual bake must use the same
+  // frame instead of only normalizing the editor display.
   const sourceContainer = new THREE.Group();
   sourceContainer.name = '__RetargetSourceContainer__';
+
+  const sourceAlignment = new THREE.Group();
+  sourceAlignment.name = '__RetargetSourceAlignment__';
+
   const sourceActionTransform = new THREE.Group();
   sourceActionTransform.name = '__ActionToEdit_ActionTransform__';
-  sourceContainer.add(sourceActionTransform);
+
+  sourceContainer.add(sourceAlignment);
+  sourceAlignment.add(sourceActionTransform);
   sourceActionTransform.add(sourceRoot);
+
+  const targetContainer = new THREE.Group();
+  targetContainer.name = '__RetargetTargetContainer__';
+
+  const targetAlignment = new THREE.Group();
+  targetAlignment.name = '__RetargetTargetAlignment__';
+
+  targetContainer.add(targetAlignment);
+  targetAlignment.add(targetRoot);
 
   restoreAssetRest(sourceRoot, sourceAsset);
   restoreAssetRest(targetRoot, targetAsset);
 
   sourceContainer.updateMatrixWorld(true);
-  targetRoot.updateMatrixWorld(true);
+  targetContainer.updateMatrixWorld(true);
 
   const sourceBones = boneMap(sourceRoot);
   const targetBones = boneMap(targetRoot);
   const sourceNames = [...sourceBones.keys()];
   const targetNames = [...targetBones.keys()];
+
+  const sourceAlignmentQuaternion =
+    computeHumanoidUprightQuaternion(sourceBones);
+
+  const targetAlignmentQuaternion =
+    computeHumanoidUprightQuaternion(targetBones);
+
+  sourceAlignment.quaternion.copy(sourceAlignmentQuaternion);
+  targetAlignment.quaternion.copy(targetAlignmentQuaternion);
+
+  sourceContainer.updateMatrixWorld(true);
+  targetContainer.updateMatrixWorld(true);
 
   // BlendCap runs inside Blender, so mapping an FK control works because the
   // target constraint/driver stack propagates that control to the deform
@@ -494,6 +522,7 @@ export async function buildRetargetClip({
   sourceRoot.updateMatrixWorld(true);
 
   restoreAssetRest(targetRoot, targetAsset);
+  targetContainer.updateMatrixWorld(true);
   const targetRest = captureBonePose(targetRoot);
 
   // BlendCap FK->IK is a SECOND bake. It samples the already-retargeted target
@@ -583,7 +612,7 @@ export async function buildRetargetClip({
     sourceContainer.updateMatrixWorld(true);
 
     restoreAssetRest(targetRoot, targetAsset);
-    targetRoot.updateMatrixWorld(true);
+    targetContainer.updateMatrixWorld(true);
 
     for (const targetName of targetOrder) {
       const targetBone = targetBones.get(targetName);
@@ -880,10 +909,63 @@ export async function buildRetargetClip({
     throw new Error('El retarget no produjo tracks.');
   }
 
-  // Retarget clips stay intentionally sparse.
-  // Playback restores the Target to its true bind/rest pose before evaluating
-  // this clip, so unmapped bones inherit the correct clean pose without
-  // embedding control-rig bind positions/quaternions into the Action.
+  // A retargeted Action must be self-contained. Control-rig FBXs can contain
+  // hundreds of bones, while the preset may animate only ~20 FK roles. Leaving
+  // the others sparse lets the imported/export pose (or the end pose of a
+  // previous Blender Action baked into the FBX) leak into the new clip.
+  //
+  // Bake a constant bind/rest position + quaternion for EVERY target bone that
+  // is not explicitly animated. Scale is intentionally NOT keyed.
+  const keyedByBone = new Map();
+
+  for (const track of tracks) {
+    let parsed = null;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      parsed = null;
+    }
+
+    if (!parsed?.nodeName || !parsed?.propertyName) continue;
+
+    if (!keyedByBone.has(parsed.nodeName)) {
+      keyedByBone.set(parsed.nodeName, new Set());
+    }
+
+    keyedByBone.get(parsed.nodeName).add(parsed.propertyName);
+  }
+
+  const baselineTimes = [0, duration];
+  let baselineBoneCount = 0;
+
+  for (const [boneName, rest] of targetRest) {
+    if (!targetBones.has(boneName)) continue;
+
+    const channels = keyedByBone.get(boneName) || new Set();
+    let wrote = false;
+
+    if (!channels.has('position')) {
+      const p = rest.localPosition;
+      tracks.push(new THREE.VectorKeyframeTrack(
+        boneName + '.position',
+        baselineTimes,
+        [p.x, p.y, p.z, p.x, p.y, p.z]
+      ));
+      wrote = true;
+    }
+
+    if (!channels.has('quaternion')) {
+      const q = rest.localQuaternion.clone().normalize();
+      tracks.push(new THREE.QuaternionKeyframeTrack(
+        boneName + '.quaternion',
+        baselineTimes,
+        [q.x, q.y, q.z, q.w, q.x, q.y, q.z, q.w]
+      ));
+      wrote = true;
+    }
+
+    if (wrote) baselineBoneCount += 1;
+  }
 
   const clip = new THREE.AnimationClip(clipName, duration, tracks);
   clip.resetDuration();
@@ -916,8 +998,20 @@ export async function buildRetargetClip({
         })),
       weightedTargetBoneCount: weightedTargetBones.size,
       influentialTargetBoneCount: influentialTargetBones.size,
-      restBaselineBoneCount: 0,
-      restBaselineMode: 'imported-fbx-rest',
+      restBaselineBoneCount: baselineBoneCount,
+      restBaselineMode: 'full-bind-position-quaternion',
+      targetAlignmentQuaternion: {
+        x: targetAlignmentQuaternion.x,
+        y: targetAlignmentQuaternion.y,
+        z: targetAlignmentQuaternion.z,
+        w: targetAlignmentQuaternion.w,
+      },
+      sourceAlignmentQuaternion: {
+        x: sourceAlignmentQuaternion.x,
+        y: sourceAlignmentQuaternion.y,
+        z: sourceAlignmentQuaternion.z,
+        w: sourceAlignmentQuaternion.w,
+      },
       generatedTrackCount: tracks.length,
       generatedRotationTracks: tracks.filter((track) =>
         track.name.endsWith('.quaternion')
@@ -1969,6 +2063,117 @@ function blenderAxesToThreeWorld(value) {
   if (axes.includes('Y')) out += 'Z';
 
   return normalizeAxes(out);
+}
+
+function computeHumanoidUprightQuaternion(bones) {
+  if (!bones?.size) {
+    return new THREE.Quaternion();
+  }
+
+  const bestBone = (semantic) => {
+    let best = null;
+    let bestScore = -Infinity;
+
+    for (const [name, bone] of bones) {
+      if (semanticBoneKey(name) !== semantic) continue;
+
+      const n = String(name || '').toLowerCase();
+      let score = 0;
+
+      if (/^mixamorig/.test(n)) score += 100;
+      if (/^def[-_:]/.test(n)) score += 90;
+      if (/^fk[-_:]/.test(n)) score += 80;
+
+      if (/(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|ik-|hng|p-str|str-|twist|tweak|roll)/i.test(n)) {
+        score -= 100;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = bone;
+      }
+    }
+
+    return best;
+  };
+
+  const hips =
+    bestBone('hips') ||
+    bestBone('spine');
+
+  const head =
+    bestBone('head') ||
+    bestBone('neck');
+
+  if (!hips || !head) {
+    return new THREE.Quaternion();
+  }
+
+  const hipsPos = new THREE.Vector3();
+  const headPos = new THREE.Vector3();
+
+  hips.getWorldPosition(hipsPos);
+  head.getWorldPosition(headPos);
+
+  const up = headPos.clone().sub(hipsPos);
+
+  if (up.lengthSq() < 1e-10) {
+    return new THREE.Quaternion();
+  }
+
+  up.normalize();
+
+  const left =
+    bestBone('leftshoulder') ||
+    bestBone('leftthigh');
+
+  const right =
+    bestBone('rightshoulder') ||
+    bestBone('rightthigh');
+
+  const rightAxis = new THREE.Vector3(1, 0, 0);
+
+  if (left && right) {
+    const leftPos = new THREE.Vector3();
+    const rightPos = new THREE.Vector3();
+
+    left.getWorldPosition(leftPos);
+    right.getWorldPosition(rightPos);
+
+    rightAxis.copy(rightPos).sub(leftPos);
+  }
+
+  rightAxis.addScaledVector(
+    up,
+    -rightAxis.dot(up)
+  );
+
+  if (rightAxis.lengthSq() < 1e-10) {
+    rightAxis.set(1, 0, 0);
+  }
+
+  rightAxis.normalize();
+
+  const forward = new THREE.Vector3()
+    .crossVectors(rightAxis, up);
+
+  if (forward.lengthSq() < 1e-10) {
+    return new THREE.Quaternion();
+  }
+
+  forward.normalize();
+
+  const basis = new THREE.Matrix4().makeBasis(
+    rightAxis,
+    up,
+    forward
+  );
+
+  const currentBasis = new THREE.Quaternion()
+    .setFromRotationMatrix(basis)
+    .normalize();
+
+  return currentBasis.invert();
 }
 
 function computeRigHeightFromPose(pose, includedNames = null) {
