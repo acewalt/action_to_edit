@@ -1031,17 +1031,30 @@ function buildCleanExportRoot(base, clips) {
   return exportRoot;
 }
 
-function applyFbxArmatureOrientationFix(exportRoot) {
-  // Blender/Unity FBX import was introducing an effective 180° Z orientation
-  // on the armature object. The user-confirmed manual fix was setting that
-  // armature Z rotation back by 180°. Apply the equivalent correction once,
-  // to the whole exported character, without changing individual bone curves.
-  const correction = new THREE.Quaternion().setFromAxisAngle(
+function applyFbxArmatureOrientationFix(exportRoot, preset) {
+  // Corrección global del objeto raíz solamente. Nunca modifica las curvas
+  // internas de los huesos ni las Actions.
+  //
+  // 1) Corrección Z confirmada visualmente por el usuario:
+  //    el FBX anterior importaba el armature con 180° en Z.
+  const zCorrection = new THREE.Quaternion().setFromAxisAngle(
     new THREE.Vector3(0, 0, 1),
     Math.PI
   );
+  exportRoot.quaternion.premultiply(zCorrection);
 
-  exportRoot.quaternion.premultiply(correction);
+  // 2) Blender importa este FBX con X=-90°. El FBX original de referencia
+  //    queda en X=+90°. La diferencia exacta es 180° sobre X.
+  //    Esto se aplica SOLO al preset Blender; Unity conserva su orientación
+  //    hasta validarla directamente dentro de Unity.
+  if (preset === 'blender') {
+    const xCorrection = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(1, 0, 0),
+      Math.PI
+    );
+    exportRoot.quaternion.premultiply(xCorrection);
+  }
+
   exportRoot.updateMatrix();
   exportRoot.updateMatrixWorld(true);
 }
@@ -1070,7 +1083,8 @@ async function exportFBX() {
 
   try {
     const exportRoot = buildCleanExportRoot(base, clips);
-    applyFbxArmatureOrientationFix(exportRoot);
+    const preset = els.presetSelect.value;
+    applyFbxArmatureOrientationFix(exportRoot, preset);
     const exporter = new FBXExporter();
 
     // FBXLoader conserva las unidades numéricas del archivo de origen.
@@ -1079,7 +1093,7 @@ async function exportFBX() {
     const sourceUnitScale = getAssetUnitScale(base);
 
     const bytes = await exporter.parseAsync(exportRoot, {
-      preset: els.presetSelect.value,
+      preset,
       unitScale: sourceUnitScale,
       animations: clips,
       includeAnimations: true,
@@ -1093,7 +1107,7 @@ async function exportFBX() {
     downloadBlob(blob, filename);
 
     setStatus(
-      'FBX exportado con retarget de rest pose, orientación Z corregida y unidad preservada (' +
+      'FBX exportado con retarget de rest pose, orientación de root corregida y unidad preservada (' +
       sourceUnitScale + '): ' + filename + ' · ' + clips.length + ' actions.',
       'ok'
     );
