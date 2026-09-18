@@ -17,7 +17,8 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-29';
+} from './retargeting.js?v=20260918-30';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-30';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -129,6 +130,23 @@ const els = {
   retargetSortStandardBtn: $('#retargetSortStandardBtn'),
   retargetClearPairsBtn: $('#retargetClearPairsBtn'),
   retargetPairTableBody: $('#retargetPairTableBody'),
+  retargetBoneMapTab: $('#retargetBoneMapTab'),
+  retargetRestPoseTab: $('#retargetRestPoseTab'),
+  retargetBoneMapPane: $('#retargetBoneMapPane'),
+  retargetRestPosePane: $('#retargetRestPosePane'),
+  retargetRestViewport: $('#retargetRestViewport'),
+  retargetRestViewportBadge: $('#retargetRestViewportBadge'),
+  retargetRestShowSource: $('#retargetRestShowSource'),
+  retargetRestShowTarget: $('#retargetRestShowTarget'),
+  retargetRestShowMeshes: $('#retargetRestShowMeshes'),
+  retargetRestBoneSelect: $('#retargetRestBoneSelect'),
+  retargetRestRotateBtn: $('#retargetRestRotateBtn'),
+  retargetRestMoveBtn: $('#retargetRestMoveBtn'),
+  retargetRestSpaceSelect: $('#retargetRestSpaceSelect'),
+  retargetRestResetBoneBtn: $('#retargetRestResetBoneBtn'),
+  retargetRestResetAllBtn: $('#retargetRestResetAllBtn'),
+  retargetRestFitBtn: $('#retargetRestFitBtn'),
+  retargetRestUsePoseBtn: $('#retargetRestUsePoseBtn'),
   retargetSourceBonesList: $('#retargetSourceBonesList'),
   retargetTargetBonesList: $('#retargetTargetBonesList'),
   retargetAutoScale: $('#retargetAutoScale'),
@@ -189,6 +207,10 @@ const state = {
   retargetPresetData: null,
   retargetPresetId: '__AUTO__',
   retargetPairViewAZ: false,
+  retargetWorkspace: 'map',
+  retargetRestEditor: null,
+  retargetRestEditorDirty: false,
+  retargetManualRestPoses: {},
   retargetIkChains: [],
   retargetCustomIkSources: {
     enabled: false,
@@ -3399,6 +3421,10 @@ function clearAll() {
   state.retargetPairs = [];
   state.retargetPresetData = null;
   state.retargetPresetId = '__AUTO__';
+  state.retargetWorkspace = 'map';
+  state.retargetRestEditorDirty = false;
+  state.retargetManualRestPoses = {};
+  state.retargetRestEditor?.clearDisplay?.();
   state.retargetIkChains = [];
   state.retargetCustomIkSources = {
     enabled: false,
@@ -4387,6 +4413,196 @@ els.timeline.addEventListener('input', () => {
 
 const RETARGET_CUSTOM_STORAGE_KEY = 'action_to_edit_retarget_presets_v1';
 
+function retargetRestPoseKey(
+  sourceId = els.retargetSourceRig.value,
+  targetId = els.retargetTargetRig.value
+) {
+  return String(sourceId || '') + '=>' + String(targetId || '');
+}
+
+function getCommittedRetargetRestPose() {
+  return state.retargetManualRestPoses[retargetRestPoseKey()] || null;
+}
+
+function setCommittedRetargetRestPose(pose) {
+  const key = retargetRestPoseKey();
+  if (!key || key === '=>') return;
+  state.retargetManualRestPoses[key] = pose;
+}
+
+function clearCommittedRetargetRestPose() {
+  delete state.retargetManualRestPoses[retargetRestPoseKey()];
+}
+
+function clonePlainPose(pose) {
+  return pose ? JSON.parse(JSON.stringify(pose)) : null;
+}
+
+function updateRetargetRestBadge() {
+  const committed = Boolean(getCommittedRetargetRestPose());
+  const dirty = Boolean(state.retargetRestEditorDirty);
+
+  if (!els.retargetRestViewportBadge) return;
+
+  if (dirty) {
+    els.retargetRestViewportBadge.textContent =
+      'Pose editada · pendiente de usar como Rest';
+    els.retargetRestViewportBadge.classList.add('active');
+    return;
+  }
+
+  if (committed) {
+    els.retargetRestViewportBadge.textContent =
+      'Rest Pose redefinida · activa para este Source → Target';
+    els.retargetRestViewportBadge.classList.add('active');
+    return;
+  }
+
+  els.retargetRestViewportBadge.textContent = 'Sin pose redefinida';
+  els.retargetRestViewportBadge.classList.remove('active');
+}
+
+function ensureRetargetRestEditor() {
+  if (state.retargetRestEditor) return state.retargetRestEditor;
+
+  const editor = new RestPoseEditor(els.retargetRestViewport, {
+    onBoneSelected: (name) => {
+      if (
+        name &&
+        [...els.retargetRestBoneSelect.options].some(
+          (option) => option.value === name
+        )
+      ) {
+        els.retargetRestBoneSelect.value = name;
+      }
+    },
+    onPoseChanged: () => {
+      state.retargetRestEditorDirty = true;
+      updateRetargetRestBadge();
+    },
+  });
+
+  state.retargetRestEditor = editor;
+  return editor;
+}
+
+function populateRetargetRestBoneSelect(editor = state.retargetRestEditor) {
+  const names = editor?.getSourceBoneNames?.() || [];
+  const previous = els.retargetRestBoneSelect.value;
+
+  els.retargetRestBoneSelect.innerHTML = names
+    .slice()
+    .sort((a, b) => actionNameCollator.compare(a, b))
+    .map(
+      (name) =>
+        '<option value="' +
+        escapeHtml(name) +
+        '">' +
+        escapeHtml(name) +
+        '</option>'
+    )
+    .join('');
+
+  const selected =
+    (previous && names.includes(previous) && previous) ||
+    editor?.selectedBoneName ||
+    names.find((name) => /(^|[:_.-])hips?$/i.test(name)) ||
+    names.find((name) => /spine/i.test(name)) ||
+    names[0] ||
+    '';
+
+  if (selected) {
+    els.retargetRestBoneSelect.value = selected;
+    editor?.selectBone(selected);
+  }
+}
+
+function rebuildRetargetRestEditor({ fit = true } = {}) {
+  if (state.retargetWorkspace !== 'rest') return;
+
+  const source = retargetSourceAsset();
+  const target = retargetTargetAsset();
+  if (!source || !target) return;
+
+  const editor = ensureRetargetRestEditor();
+  const committed = getCommittedRetargetRestPose();
+
+  editor.setAssets({
+    sourceAsset: source,
+    targetAsset: target,
+    autoScale: els.retargetAutoScale.checked,
+    poseOverride: committed,
+  });
+
+  editor.setVisibility({
+    source: els.retargetRestShowSource.checked,
+    target: els.retargetRestShowTarget.checked,
+    meshes: els.retargetRestShowMeshes.checked,
+  });
+
+  editor.setMode(
+    els.retargetRestMoveBtn.classList.contains('active')
+      ? 'translate'
+      : 'rotate'
+  );
+  editor.setSpace(els.retargetRestSpaceSelect.value);
+
+  state.retargetRestEditorDirty = false;
+  populateRetargetRestBoneSelect(editor);
+  updateRetargetRestBadge();
+
+  requestAnimationFrame(() => {
+    editor.resize();
+    if (fit) editor.fit();
+  });
+}
+
+function switchRetargetWorkspace(workspace) {
+  const next = workspace === 'rest' ? 'rest' : 'map';
+  state.retargetWorkspace = next;
+
+  const rest = next === 'rest';
+
+  els.retargetBoneMapTab.classList.toggle('active', !rest);
+  els.retargetRestPoseTab.classList.toggle('active', rest);
+  els.retargetBoneMapTab.setAttribute('aria-selected', String(!rest));
+  els.retargetRestPoseTab.setAttribute('aria-selected', String(rest));
+
+  els.retargetBoneMapPane.classList.toggle('is-hidden', rest);
+  els.retargetRestPosePane.classList.toggle('is-hidden', !rest);
+
+  if (rest) {
+    requestAnimationFrame(() => rebuildRetargetRestEditor());
+  }
+}
+
+function useCurrentRetargetRestPose({ silent = false } = {}) {
+  const editor = ensureRetargetRestEditor();
+  if (!editor?.sourceRoot) {
+    if (!silent) {
+      setRetargetProgress(0, 'No hay Source/Target cargados en el editor de Rest Pose.');
+    }
+    return null;
+  }
+
+  const pose = clonePlainPose(editor.capturePose());
+  setCommittedRetargetRestPose(pose);
+  state.retargetRestEditorDirty = false;
+  els.retargetRestMode.value = 'manual';
+  updateRetargetRestBadge();
+
+  if (!silent) {
+    setRetargetProgress(
+      0,
+      'Rest Pose redefinida guardada para este Source → Target.'
+    );
+  }
+
+  return pose;
+}
+
+
+
 function retargetAssetById(id) {
   return state.assets.find((asset) => asset.id === id) || null;
 }
@@ -5142,6 +5358,10 @@ function openRetargetingWindow() {
   els.retargetOverlay.classList.remove('is-hidden');
   els.retargetOverlay.setAttribute('aria-hidden', 'false');
   setRetargetProgress(0, 'Listo para retargeting.');
+
+  if (state.retargetWorkspace === 'rest') {
+    requestAnimationFrame(() => rebuildRetargetRestEditor());
+  }
 }
 
 function closeRetargetingWindow() {
@@ -5229,6 +5449,26 @@ async function applyCurrentRetargeting() {
       '_retarget_' +
       targetLabel.replace(/\s+/g, '_');
 
+    let sourceRestOverride = null;
+    if (els.retargetRestMode.value === 'manual') {
+      const editor = state.retargetRestEditor;
+      const editingCurrentPair =
+        editor?.sourceAsset === sourceAsset &&
+        editor?.targetAsset === targetAsset;
+
+      if (editingCurrentPair) {
+        sourceRestOverride = useCurrentRetargetRestPose({ silent: true });
+      } else {
+        sourceRestOverride = getCommittedRetargetRestPose();
+      }
+
+      if (!sourceRestOverride) {
+        throw new Error(
+          'Redefine Rest Pose está activo, pero todavía no hay una pose guardada.'
+        );
+      }
+    }
+
     const result = await buildRetargetClip({
       sourceAsset,
       targetAsset,
@@ -5241,6 +5481,7 @@ async function applyCurrentRetargeting() {
       sampleFps: Number(els.retargetSampleFps.value) || 30,
       sourceRestMode: els.retargetRestMode.value,
       sourceRestRotationOnly: els.retargetRestRotationOnly.checked,
+      sourceRestOverride,
       headSource: els.retargetHeadSource.value.trim(),
       headTarget: els.retargetHeadTarget.value.trim(),
       clipName: outputName,
@@ -5361,6 +5602,9 @@ els.retargetSourceRig.addEventListener('change', () => {
   } else {
     autoMatchCurrentRetargetMap();
   }
+  if (state.retargetWorkspace === 'rest') {
+    requestAnimationFrame(() => rebuildRetargetRestEditor());
+  }
 });
 
 els.retargetTargetRig.addEventListener('change', () => {
@@ -5372,6 +5616,9 @@ els.retargetTargetRig.addEventListener('change', () => {
     );
   } else {
     autoMatchCurrentRetargetMap();
+  }
+  if (state.retargetWorkspace === 'rest') {
+    requestAnimationFrame(() => rebuildRetargetRestEditor());
   }
 });
 
@@ -5428,6 +5675,77 @@ els.retargetClearPairsBtn.addEventListener('click', () => {
   renderRetargetPairs();
 });
 
+
+els.retargetBoneMapTab.addEventListener('click', () => {
+  switchRetargetWorkspace('map');
+});
+
+els.retargetRestPoseTab.addEventListener('click', () => {
+  switchRetargetWorkspace('rest');
+});
+
+els.retargetRestBoneSelect.addEventListener('change', () => {
+  state.retargetRestEditor?.selectBone(els.retargetRestBoneSelect.value);
+});
+
+els.retargetRestRotateBtn.addEventListener('click', () => {
+  els.retargetRestRotateBtn.classList.add('active');
+  els.retargetRestMoveBtn.classList.remove('active');
+  state.retargetRestEditor?.setMode('rotate');
+});
+
+els.retargetRestMoveBtn.addEventListener('click', () => {
+  els.retargetRestMoveBtn.classList.add('active');
+  els.retargetRestRotateBtn.classList.remove('active');
+  state.retargetRestEditor?.setMode('translate');
+
+  if (els.retargetRestRotationOnly.checked) {
+    setRetargetProgress(
+      0,
+      'Mover huesos solo afectará el Rest si desactivas "Solo rotación para el Rest override".'
+    );
+  }
+});
+
+els.retargetRestSpaceSelect.addEventListener('change', () => {
+  state.retargetRestEditor?.setSpace(els.retargetRestSpaceSelect.value);
+});
+
+els.retargetRestResetBoneBtn.addEventListener('click', () => {
+  state.retargetRestEditor?.resetSelectedBone();
+  state.retargetRestEditorDirty = true;
+  updateRetargetRestBadge();
+});
+
+els.retargetRestResetAllBtn.addEventListener('click', () => {
+  clearCommittedRetargetRestPose();
+  state.retargetRestEditor?.resetAll();
+  state.retargetRestEditorDirty = false;
+  els.retargetRestMode.value = 'original';
+  updateRetargetRestBadge();
+  setRetargetProgress(0, 'Rest Pose restaurada al FBX original.');
+});
+
+els.retargetRestFitBtn.addEventListener('click', () => {
+  state.retargetRestEditor?.fit();
+});
+
+els.retargetRestUsePoseBtn.addEventListener('click', () => {
+  useCurrentRetargetRestPose();
+});
+
+function syncRetargetRestVisibility() {
+  state.retargetRestEditor?.setVisibility({
+    source: els.retargetRestShowSource.checked,
+    target: els.retargetRestShowTarget.checked,
+    meshes: els.retargetRestShowMeshes.checked,
+  });
+}
+
+els.retargetRestShowSource.addEventListener('change', syncRetargetRestVisibility);
+els.retargetRestShowTarget.addEventListener('change', syncRetargetRestVisibility);
+els.retargetRestShowMeshes.addEventListener('change', syncRetargetRestVisibility);
+
 [
   els.retargetAutoScale,
   els.retargetWorldLocation,
@@ -5438,6 +5756,22 @@ els.retargetClearPairsBtn.addEventListener('click', () => {
   els.retargetHeadTarget,
 ].forEach((control) => {
   control.addEventListener('change', markRetargetPresetDirty);
+});
+
+els.retargetRestMode.addEventListener('change', () => {
+  if (els.retargetRestMode.value === 'manual') {
+    switchRetargetWorkspace('rest');
+    if (!getCommittedRetargetRestPose()) {
+      setRetargetProgress(
+        0,
+        'Ajusta el Source en el viewport y pulsa "Usar esta pose como Rest".'
+      );
+    }
+  }
+});
+
+els.retargetAutoScale.addEventListener('change', () => {
+  state.retargetRestEditor?.setAutoScale(els.retargetAutoScale.checked);
 });
 
 els.retargetAutoBakeIk.addEventListener('change', () => {
