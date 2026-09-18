@@ -5,6 +5,19 @@ import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
+import {
+  BLENDCAP_STANDARD_PRESETS,
+  fetchBlendCapPreset,
+  normalizePresetData,
+  normalizePair,
+  collectBoneNames as collectRetargetBoneNames,
+  resolveBoneName as resolveRetargetBoneName,
+  detectPrefix as detectRetargetPrefix,
+  autoMatchPairs as autoMatchRetargetPairs,
+  countValidPairs as countValidRetargetPairs,
+  sortPairsStandard as sortRetargetPairsStandard,
+  buildRetargetClip,
+} from './retargeting.js';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -88,6 +101,51 @@ const els = {
   exportActionCount: $('#exportActionCount'),
   exportFbxBtn: $('#exportFbxBtn'),
   exportGlbBtn: $('#exportGlbBtn'),
+
+  openRetargetBtn: $('#openRetargetBtn'),
+  retargetOverlay: $('#retargetOverlay'),
+  closeRetargetBtn: $('#closeRetargetBtn'),
+  retargetCancelBtn: $('#retargetCancelBtn'),
+  retargetSourceRig: $('#retargetSourceRig'),
+  retargetTargetRig: $('#retargetTargetRig'),
+  retargetSourceAction: $('#retargetSourceAction'),
+  retargetPreset: $('#retargetPreset'),
+  retargetBlendCapPresetGroup: $('#retargetBlendCapPresetGroup'),
+  retargetCustomPresetGroup: $('#retargetCustomPresetGroup'),
+  retargetReloadPresetBtn: $('#retargetReloadPresetBtn'),
+  retargetImportPresetBtn: $('#retargetImportPresetBtn'),
+  retargetSavePresetBtn: $('#retargetSavePresetBtn'),
+  retargetExportPresetBtn: $('#retargetExportPresetBtn'),
+  retargetPresetFileInput: $('#retargetPresetFileInput'),
+  retargetSourcePrefix: $('#retargetSourcePrefix'),
+  retargetTargetPrefix: $('#retargetTargetPrefix'),
+  retargetDetectPrefixesBtn: $('#retargetDetectPrefixesBtn'),
+  retargetValidPairs: $('#retargetValidPairs'),
+  retargetPairSearch: $('#retargetPairSearch'),
+  retargetAddPairBtn: $('#retargetAddPairBtn'),
+  retargetAddAllBtn: $('#retargetAddAllBtn'),
+  retargetAutoMatchBtn: $('#retargetAutoMatchBtn'),
+  retargetSortAZBtn: $('#retargetSortAZBtn'),
+  retargetSortStandardBtn: $('#retargetSortStandardBtn'),
+  retargetClearPairsBtn: $('#retargetClearPairsBtn'),
+  retargetPairTableBody: $('#retargetPairTableBody'),
+  retargetSourceBonesList: $('#retargetSourceBonesList'),
+  retargetTargetBonesList: $('#retargetTargetBonesList'),
+  retargetAutoScale: $('#retargetAutoScale'),
+  retargetWorldLocation: $('#retargetWorldLocation'),
+  retargetAutoBakeIk: $('#retargetAutoBakeIk'),
+  retargetRestMode: $('#retargetRestMode'),
+  retargetRestRotationOnly: $('#retargetRestRotationOnly'),
+  retargetSampleFps: $('#retargetSampleFps'),
+  retargetHeadSource: $('#retargetHeadSource'),
+  retargetHeadTarget: $('#retargetHeadTarget'),
+  retargetIkChains: $('#retargetIkChains'),
+  retargetCustomIkEnabled: $('#retargetCustomIkEnabled'),
+  retargetCustomIkFields: $('#retargetCustomIkFields'),
+  retargetProgressBar: $('#retargetProgressBar'),
+  retargetProgressText: $('#retargetProgressText'),
+  applyRetargetBtn: $('#applyRetargetBtn'),
+
   assetTemplate: $('#assetTemplate'),
   actionTemplate: $('#actionTemplate'),
 };
@@ -124,6 +182,25 @@ const state = {
   limbGizmoDrag: null,
   isScrubbing: false,
   exporting: false,
+
+  retargetingOpen: false,
+  retargetBusy: false,
+  retargetPairs: [],
+  retargetPresetData: null,
+  retargetPresetId: '__AUTO__',
+  retargetPairViewAZ: false,
+  retargetIkChains: [],
+  retargetCustomIkSources: {
+    enabled: false,
+    left_hand: '',
+    right_hand: '',
+    left_foot: '',
+    right_foot: '',
+    left_forearm: '',
+    right_forearm: '',
+    left_shin: '',
+    right_shin: '',
+  },
 };
 
 const ACTION_TRANSFORM_NAME = '__ActionToEdit_ActionTransform__';
@@ -3319,6 +3396,26 @@ function clearAll() {
   state.freeProjectionMode = 'perspective';
   state.axisViewReturnMode = 'perspective';
   state.blenderNavDrag = null;
+  state.retargetPairs = [];
+  state.retargetPresetData = null;
+  state.retargetPresetId = '__AUTO__';
+  state.retargetIkChains = [];
+  state.retargetCustomIkSources = {
+    enabled: false,
+    left_hand: '',
+    right_hand: '',
+    left_foot: '',
+    right_foot: '',
+    left_forearm: '',
+    right_forearm: '',
+    left_shin: '',
+    right_shin: '',
+  };
+  if (els.retargetOverlay) {
+    state.retargetingOpen = false;
+    els.retargetOverlay.classList.add('is-hidden');
+    els.retargetOverlay.setAttribute('aria-hidden', 'true');
+  }
   hideRootGizmo();
   hideLimbGizmo();
 
@@ -4287,6 +4384,1044 @@ els.timeline.addEventListener('input', () => {
   state.mixer.setTime(time);
   els.currentTime.textContent = formatDuration(time);
 });
+
+const RETARGET_CUSTOM_STORAGE_KEY = 'action_to_edit_retarget_presets_v1';
+
+function retargetAssetById(id) {
+  return state.assets.find((asset) => asset.id === id) || null;
+}
+
+function retargetRecordById(id) {
+  return state.clips.find((record) => record.id === id) || null;
+}
+
+function retargetSourceAsset() {
+  return retargetAssetById(els.retargetSourceRig.value);
+}
+
+function retargetTargetAsset() {
+  return retargetAssetById(els.retargetTargetRig.value);
+}
+
+function retargetSourceRecord() {
+  return retargetRecordById(els.retargetSourceAction.value);
+}
+
+function retargetBoneNames(asset) {
+  return asset ? collectRetargetBoneNames(asset.object) : [];
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/"/g, '&quot;');
+}
+
+function loadCustomRetargetPresets() {
+  try {
+    const raw = localStorage.getItem(RETARGET_CUSTOM_STORAGE_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCustomRetargetPresets(data) {
+  localStorage.setItem(RETARGET_CUSTOM_STORAGE_KEY, JSON.stringify(data));
+}
+
+function currentRetargetMapData(name = 'Custom Retarget Map') {
+  return normalizePresetData({
+    name,
+    version: 1,
+    target_kind: state.retargetPresetData?.target_kind || 'generic',
+    source_prefix: els.retargetSourcePrefix.value.trim(),
+    namespace_strip: els.retargetTargetPrefix.value.trim(),
+    auto_bake_ik: els.retargetAutoBakeIk.checked,
+    use_world_location: els.retargetWorldLocation.checked,
+    face_head_source: els.retargetHeadSource.value.trim(),
+    face_head_target: els.retargetHeadTarget.value.trim(),
+    pairs: state.retargetPairs.map((pair) => ({
+      source: pair.source,
+      target: pair.target,
+      channels: pair.channels,
+      axes: pair.axes,
+      influence: pair.influence,
+      loc_space: pair.anchor ? 'HEAD_LOCAL' : (pair.loc_space || 'BASIS'),
+      anchor: pair.anchor,
+      loc_scale: pair.loc_scale,
+    })),
+    ik_chains: state.retargetIkChains,
+    custom_ik_sources: state.retargetCustomIkSources,
+  }, name);
+}
+
+function initializeRetargetPresetOptions() {
+  if (!els.retargetBlendCapPresetGroup.dataset.ready) {
+    els.retargetBlendCapPresetGroup.innerHTML = BLENDCAP_STANDARD_PRESETS
+      .map((preset) =>
+        '<option value="blendcap:' + escapeHtml(preset.id) + '">' +
+        escapeHtml(preset.label) +
+        '</option>'
+      )
+      .join('');
+    els.retargetBlendCapPresetGroup.dataset.ready = '1';
+  }
+
+  const custom = loadCustomRetargetPresets();
+  els.retargetCustomPresetGroup.innerHTML = Object.keys(custom)
+    .sort((a, b) => actionNameCollator.compare(a, b))
+    .map((name) =>
+      '<option value="custom:' + escapeHtml(name) + '">' +
+      escapeHtml(name) +
+      '</option>'
+    )
+    .join('');
+}
+
+function setRetargetProgress(progress, textValue) {
+  const pct = THREE.MathUtils.clamp(Number(progress) || 0, 0, 1) * 100;
+  els.retargetProgressBar.style.width = pct.toFixed(1) + '%';
+  els.retargetProgressText.textContent = textValue || 'Listo.';
+}
+
+function fillSelect(select, items, selectedValue = '') {
+  select.innerHTML = items
+    .map((item) =>
+      '<option value="' + escapeHtml(item.value) + '">' +
+      escapeHtml(item.label) +
+      '</option>'
+    )
+    .join('');
+
+  if (selectedValue && [...select.options].some((option) => option.value === selectedValue)) {
+    select.value = selectedValue;
+  }
+}
+
+function populateRetargetRigSelects() {
+  const currentSource = els.retargetSourceRig.value;
+  const currentTarget = els.retargetTargetRig.value;
+
+  const assetItems = state.assets.map((asset) => ({
+    value: asset.id,
+    label: asset.file?.name || asset.object?.name || asset.id,
+  }));
+
+  const activeRecord = getActiveRecord();
+  const defaultSource =
+    currentSource ||
+    activeRecord?.sourceId ||
+    state.baseAssetId ||
+    state.assets[0]?.id ||
+    '';
+
+  const defaultTarget =
+    currentTarget ||
+    state.baseAssetId ||
+    state.assets.find((asset) => asset.id !== defaultSource)?.id ||
+    defaultSource;
+
+  fillSelect(els.retargetSourceRig, assetItems, defaultSource);
+  fillSelect(els.retargetTargetRig, assetItems, defaultTarget);
+
+  populateRetargetActionSelect();
+  refreshRetargetBoneLists();
+}
+
+function populateRetargetActionSelect() {
+  const sourceId = els.retargetSourceRig.value;
+  const previous = els.retargetSourceAction.value;
+
+  const records = sortActionRecords(
+    state.clips.filter((record) =>
+      record.sourceId === sourceId &&
+      !isEmptyClip(record)
+    )
+  );
+
+  fillSelect(
+    els.retargetSourceAction,
+    records.map((record) => ({
+      value: record.id,
+      label: record.name + ' · ' + record.sourceFile,
+    })),
+    previous || (getActiveRecord()?.sourceId === sourceId ? getActiveRecord()?.id : '')
+  );
+}
+
+function fillBoneDatalist(datalist, names) {
+  datalist.innerHTML = (names || [])
+    .slice()
+    .sort((a, b) => actionNameCollator.compare(a, b))
+    .map((name) => '<option value="' + escapeHtml(name) + '"></option>')
+    .join('');
+}
+
+function detectHeadFromBoneNames(names) {
+  return (
+    names.find((name) => /(^|[:_.-])head$/i.test(name)) ||
+    names.find((name) => /head/i.test(name)) ||
+    ''
+  );
+}
+
+function refreshRetargetBoneLists() {
+  const source = retargetSourceAsset();
+  const target = retargetTargetAsset();
+  const sourceNames = retargetBoneNames(source);
+  const targetNames = retargetBoneNames(target);
+
+  fillBoneDatalist(els.retargetSourceBonesList, sourceNames);
+  fillBoneDatalist(els.retargetTargetBonesList, targetNames);
+
+  if (!els.retargetHeadSource.value) {
+    els.retargetHeadSource.value = detectHeadFromBoneNames(sourceNames);
+  }
+  if (!els.retargetHeadTarget.value) {
+    els.retargetHeadTarget.value = detectHeadFromBoneNames(targetNames);
+  }
+
+  renderRetargetPairs();
+  renderRetargetIkChains();
+  renderRetargetCustomIkSources();
+}
+
+function retargetPairValidity(pair) {
+  const source = retargetSourceAsset();
+  const target = retargetTargetAsset();
+  const sourceNames = retargetBoneNames(source);
+  const targetNames = retargetBoneNames(target);
+
+  return {
+    source: resolveRetargetBoneName(
+      pair.source,
+      sourceNames,
+      els.retargetSourcePrefix.value.trim()
+    ),
+    target: resolveRetargetBoneName(
+      pair.target,
+      targetNames,
+      els.retargetTargetPrefix.value.trim()
+    ),
+  };
+}
+
+function makeRetargetPairRow(pair) {
+  const validity = retargetPairValidity(pair);
+  const tr = document.createElement('tr');
+  tr.dataset.pairId = pair.id;
+  tr.classList.toggle('invalid-pair', !(validity.source && validity.target));
+
+  const sourceCell = document.createElement('td');
+  const sourceInput = document.createElement('input');
+  sourceInput.type = 'text';
+  sourceInput.setAttribute('list', 'retargetSourceBonesList');
+  sourceInput.value = pair.source;
+  sourceInput.title = validity.source
+    ? 'Resuelve a: ' + validity.source
+    : 'No se encontró este hueso en Source Rig.';
+  sourceInput.addEventListener('input', () => {
+    pair.source = sourceInput.value;
+    markRetargetPresetDirty();
+    renderRetargetPairs();
+  });
+  sourceCell.appendChild(sourceInput);
+
+  const targetCell = document.createElement('td');
+  const targetInput = document.createElement('input');
+  targetInput.type = 'text';
+  targetInput.setAttribute('list', 'retargetTargetBonesList');
+  targetInput.value = pair.target;
+  targetInput.title = validity.target
+    ? 'Resuelve a: ' + validity.target
+    : 'No se encontró este hueso en Target Rig.';
+  targetInput.addEventListener('input', () => {
+    pair.target = targetInput.value;
+    markRetargetPresetDirty();
+    renderRetargetPairs();
+  });
+  targetCell.appendChild(targetInput);
+
+  const channelsCell = document.createElement('td');
+  const channels = document.createElement('select');
+  [
+    ['ROT', 'Rotation'],
+    ['LOC', 'Location'],
+    ['LOC_ROT', 'Location & Rotation'],
+  ].forEach(([value, label]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    channels.appendChild(option);
+  });
+  channels.value = pair.channels;
+  channels.addEventListener('change', () => {
+    pair.channels = channels.value;
+    markRetargetPresetDirty();
+    renderRetargetPairs();
+  });
+  channelsCell.appendChild(channels);
+
+  const axesCell = document.createElement('td');
+  const axes = document.createElement('select');
+  ['XYZ', 'XY', 'XZ', 'YZ', 'X', 'Y', 'Z'].forEach((value) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    axes.appendChild(option);
+  });
+  axes.value = pair.axes || 'XYZ';
+  axes.disabled = pair.channels === 'ROT';
+  axes.addEventListener('change', () => {
+    pair.axes = axes.value;
+    markRetargetPresetDirty();
+  });
+  axesCell.appendChild(axes);
+
+  const anchorCell = document.createElement('td');
+  const anchor = document.createElement('input');
+  anchor.type = 'checkbox';
+  anchor.checked = Boolean(pair.anchor);
+  anchor.disabled = pair.channels === 'ROT';
+  anchor.title = 'Head-local anchor para Location.';
+  anchor.addEventListener('change', () => {
+    pair.anchor = anchor.checked;
+    pair.loc_space = anchor.checked ? 'HEAD_LOCAL' : 'BASIS';
+    markRetargetPresetDirty();
+  });
+  anchorCell.appendChild(anchor);
+
+  const influenceCell = document.createElement('td');
+  const influence = document.createElement('input');
+  influence.type = 'number';
+  influence.min = '0';
+  influence.max = '1';
+  influence.step = '0.05';
+  influence.value = String(pair.influence ?? 1);
+  influence.addEventListener('input', () => {
+    pair.influence = THREE.MathUtils.clamp(Number(influence.value) || 0, 0, 1);
+    markRetargetPresetDirty();
+  });
+  influenceCell.appendChild(influence);
+
+  const removeCell = document.createElement('td');
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'retarget-pair-remove';
+  remove.textContent = '×';
+  remove.title = 'Quitar par';
+  remove.addEventListener('click', () => {
+    state.retargetPairs = state.retargetPairs.filter((item) => item.id !== pair.id);
+    markRetargetPresetDirty();
+    renderRetargetPairs();
+  });
+  removeCell.appendChild(remove);
+
+  tr.append(
+    sourceCell,
+    targetCell,
+    channelsCell,
+    axesCell,
+    anchorCell,
+    influenceCell,
+    removeCell
+  );
+
+  return tr;
+}
+
+function renderRetargetPairs() {
+  if (!els.retargetPairTableBody) return;
+
+  const query = els.retargetPairSearch.value.trim().toLowerCase();
+  let pairs = [...state.retargetPairs];
+
+  if (state.retargetPairViewAZ) {
+    pairs.sort((a, b) => {
+      const bySource = actionNameCollator.compare(a.source, b.source);
+      return bySource || actionNameCollator.compare(a.target, b.target);
+    });
+  }
+
+  if (query) {
+    pairs = pairs.filter((pair) =>
+      pair.source.toLowerCase().includes(query) ||
+      pair.target.toLowerCase().includes(query)
+    );
+  }
+
+  els.retargetPairTableBody.innerHTML = '';
+  for (const pair of pairs) {
+    els.retargetPairTableBody.appendChild(makeRetargetPairRow(pair));
+  }
+
+  const source = retargetSourceAsset();
+  const target = retargetTargetAsset();
+  const valid = countValidRetargetPairs(
+    state.retargetPairs,
+    retargetBoneNames(source),
+    retargetBoneNames(target),
+    els.retargetSourcePrefix.value.trim(),
+    els.retargetTargetPrefix.value.trim()
+  );
+
+  els.retargetValidPairs.textContent =
+    valid + ' / ' + state.retargetPairs.length + ' pairs valid';
+}
+
+function markRetargetPresetDirty() {
+  if (!state.retargetPresetData) return;
+  if (![...els.retargetPreset.options].some((option) => option.value === '__UNSAVED__')) {
+    const option = document.createElement('option');
+    option.value = '__UNSAVED__';
+    option.textContent = '(Unsaved changes…)';
+    els.retargetPreset.insertBefore(option, els.retargetPreset.firstChild);
+  }
+  els.retargetPreset.value = '__UNSAVED__';
+  state.retargetPresetId = '__UNSAVED__';
+}
+
+function addRetargetPair(data = {}) {
+  state.retargetPairs.push(normalizePair({
+    ...data,
+    id: uid('pair'),
+  }));
+  markRetargetPresetDirty();
+  renderRetargetPairs();
+}
+
+function addAllRetargetSourceBones() {
+  const source = retargetSourceAsset();
+  if (!source) return;
+
+  const prefix = els.retargetSourcePrefix.value.trim();
+  const existing = new Set(state.retargetPairs.map((pair) => pair.source.toLowerCase()));
+
+  for (const name of retargetBoneNames(source)) {
+    const shortName =
+      prefix && name.startsWith(prefix)
+        ? name.slice(prefix.length)
+        : name;
+
+    if (!shortName || existing.has(shortName.toLowerCase())) continue;
+
+    state.retargetPairs.push(normalizePair({
+      id: uid('pair'),
+      source: shortName,
+      target: '',
+      channels: /hips|root/i.test(shortName) ? 'LOC_ROT' : 'ROT',
+      axes: 'XYZ',
+      influence: 1,
+    }));
+    existing.add(shortName.toLowerCase());
+  }
+
+  markRetargetPresetDirty();
+  renderRetargetPairs();
+}
+
+function autoMatchCurrentRetargetMap() {
+  const source = retargetSourceAsset();
+  const target = retargetTargetAsset();
+  if (!source || !target) return;
+
+  state.retargetPairs = autoMatchRetargetPairs(
+    retargetBoneNames(source),
+    retargetBoneNames(target),
+    els.retargetSourcePrefix.value.trim(),
+    els.retargetTargetPrefix.value.trim()
+  );
+
+  state.retargetPresetData = null;
+  state.retargetPresetId = '__AUTO__';
+  els.retargetPreset.value = '__AUTO__';
+  renderRetargetPairs();
+
+  setRetargetProgress(
+    0,
+    'Auto-Match: ' + state.retargetPairs.length + ' pares encontrados.'
+  );
+}
+
+function detectCurrentRetargetPrefixes() {
+  const source = retargetSourceAsset();
+  const target = retargetTargetAsset();
+  if (!source || !target) return;
+
+  const sourceExpected = state.retargetPairs.map((pair) => pair.source);
+  const targetExpected = state.retargetPairs.map((pair) => pair.target);
+
+  els.retargetSourcePrefix.value = detectRetargetPrefix(
+    retargetBoneNames(source),
+    sourceExpected,
+    els.retargetSourcePrefix.value.trim()
+  );
+
+  els.retargetTargetPrefix.value = detectRetargetPrefix(
+    retargetBoneNames(target),
+    targetExpected,
+    els.retargetTargetPrefix.value.trim()
+  );
+
+  renderRetargetPairs();
+  setRetargetProgress(
+    0,
+    'Prefijos detectados: Source "' +
+      els.retargetSourcePrefix.value +
+      '" · Target "' +
+      els.retargetTargetPrefix.value +
+      '".'
+  );
+}
+
+function applyRetargetPresetData(data, presetId = '') {
+  const source = retargetSourceAsset();
+  const target = retargetTargetAsset();
+  const normalized = normalizePresetData(data, data?.name || 'Preset');
+
+  state.retargetPresetData = normalized;
+  state.retargetPresetId = presetId || '__UNSAVED__';
+  state.retargetPairs = normalized.pairs.map((pair) =>
+    normalizePair({ ...pair, id: uid('pair') })
+  );
+  state.retargetIkChains = normalized.ik_chains.map((item) => ({ ...item }));
+  state.retargetCustomIkSources = {
+    ...state.retargetCustomIkSources,
+    ...normalized.custom_ik_sources,
+  };
+
+  const sourceExpected = normalized.pairs.map((pair) => pair.source);
+  const targetExpected = normalized.pairs.map((pair) => pair.target);
+
+  els.retargetSourcePrefix.value = detectRetargetPrefix(
+    retargetBoneNames(source),
+    sourceExpected,
+    normalized.source_prefix || ''
+  );
+  els.retargetTargetPrefix.value = detectRetargetPrefix(
+    retargetBoneNames(target),
+    targetExpected,
+    normalized.target_prefix || ''
+  );
+
+  els.retargetAutoBakeIk.checked = normalized.auto_bake_ik;
+  els.retargetWorldLocation.checked = normalized.use_world_location;
+  els.retargetHeadSource.value = normalized.face_head_source || '';
+  els.retargetHeadTarget.value = normalized.face_head_target || '';
+
+  if (presetId && [...els.retargetPreset.options].some((option) => option.value === presetId)) {
+    els.retargetPreset.value = presetId;
+  }
+
+  refreshRetargetBoneLists();
+  renderRetargetPairs();
+
+  setRetargetProgress(
+    0,
+    'Preset "' + normalized.name + '" cargado · ' +
+      state.retargetPairs.length + ' pares.'
+  );
+}
+
+async function loadSelectedRetargetPreset() {
+  const selected = els.retargetPreset.value;
+  if (!selected || selected === '__UNSAVED__') return;
+
+  state.retargetPresetId = selected;
+
+  if (selected === '__AUTO__') {
+    autoMatchCurrentRetargetMap();
+    return;
+  }
+
+  try {
+    setRetargetProgress(0, 'Cargando preset…');
+
+    if (selected.startsWith('blendcap:')) {
+      const preset = await fetchBlendCapPreset(selected.slice('blendcap:'.length));
+      applyRetargetPresetData(preset, selected);
+      return;
+    }
+
+    if (selected.startsWith('custom:')) {
+      const name = selected.slice('custom:'.length);
+      const custom = loadCustomRetargetPresets();
+      if (!custom[name]) throw new Error('Preset local no encontrado.');
+      applyRetargetPresetData(custom[name], selected);
+    }
+  } catch (error) {
+    setRetargetProgress(0, 'Error cargando preset: ' + (error?.message || error));
+  }
+}
+
+function renderRetargetIkChains() {
+  const rows = state.retargetIkChains.length
+    ? state.retargetIkChains
+    : [
+        { limb_kind: 'LEG', side: 'L', owner: '', ik_control: '', pole_control: '' },
+        { limb_kind: 'LEG', side: 'R', owner: '', ik_control: '', pole_control: '' },
+        { limb_kind: 'ARM', side: 'L', owner: '', ik_control: '', pole_control: '' },
+        { limb_kind: 'ARM', side: 'R', owner: '', ik_control: '', pole_control: '' },
+      ];
+
+  if (!state.retargetIkChains.length) {
+    state.retargetIkChains = rows.map((item) => ({ ...item }));
+  }
+
+  els.retargetIkChains.innerHTML = '';
+
+  state.retargetIkChains.forEach((row, index) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'retarget-ik-row';
+
+    const label = document.createElement('span');
+    label.textContent =
+      (row.limb_kind || 'LIMB') + ' ' + (row.side || '');
+
+    const ik = document.createElement('input');
+    ik.type = 'text';
+    ik.setAttribute('list', 'retargetTargetBonesList');
+    ik.placeholder = 'IK control';
+    ik.value = row.ik_control || '';
+    ik.addEventListener('input', () => {
+      state.retargetIkChains[index].ik_control = ik.value;
+      markRetargetPresetDirty();
+    });
+
+    const pole = document.createElement('input');
+    pole.type = 'text';
+    pole.setAttribute('list', 'retargetTargetBonesList');
+    pole.placeholder = 'Pole control';
+    pole.value = row.pole_control || '';
+    pole.addEventListener('input', () => {
+      state.retargetIkChains[index].pole_control = pole.value;
+      markRetargetPresetDirty();
+    });
+
+    wrap.append(label, ik, pole);
+    els.retargetIkChains.appendChild(wrap);
+  });
+}
+
+function renderRetargetCustomIkSources() {
+  const labels = [
+    ['left_hand', 'Left Hand'],
+    ['right_hand', 'Right Hand'],
+    ['left_foot', 'Left Foot'],
+    ['right_foot', 'Right Foot'],
+    ['left_forearm', 'Left Forearm'],
+    ['right_forearm', 'Right Forearm'],
+    ['left_shin', 'Left Shin'],
+    ['right_shin', 'Right Shin'],
+  ];
+
+  els.retargetCustomIkEnabled.checked =
+    Boolean(state.retargetCustomIkSources.enabled);
+
+  els.retargetCustomIkFields.innerHTML = '';
+
+  labels.forEach(([key, labelText]) => {
+    const row = document.createElement('label');
+    row.className = 'retarget-custom-ik-row';
+
+    const label = document.createElement('span');
+    label.textContent = labelText;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.setAttribute('list', 'retargetSourceBonesList');
+    input.value = state.retargetCustomIkSources[key] || '';
+    input.disabled = !state.retargetCustomIkSources.enabled;
+    input.addEventListener('input', () => {
+      state.retargetCustomIkSources[key] = input.value;
+      markRetargetPresetDirty();
+    });
+
+    row.append(label, input);
+    els.retargetCustomIkFields.appendChild(row);
+  });
+}
+
+function downloadRetargetJson(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: 'application/json',
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportCurrentRetargetPreset() {
+  const name =
+    state.retargetPresetData?.name ||
+    'Action to Edit Retarget Map';
+
+  const data = currentRetargetMapData(name);
+  downloadRetargetJson(
+    data,
+    (name || 'retarget_map')
+      .trim()
+      .replace(/\s+/g, '_')
+      .replace(/[^\w.-]+/g, '_') +
+      '.json'
+  );
+}
+
+function saveCurrentRetargetPresetLocally() {
+  const suggested =
+    state.retargetPresetData?.name ||
+    'Mi Retarget Map';
+
+  const name = window.prompt('Nombre del preset:', suggested);
+  if (!name?.trim()) return;
+
+  const finalName = name.trim();
+  const custom = loadCustomRetargetPresets();
+  custom[finalName] = currentRetargetMapData(finalName);
+  saveCustomRetargetPresets(custom);
+
+  initializeRetargetPresetOptions();
+  const value = 'custom:' + finalName;
+  els.retargetPreset.value = value;
+  state.retargetPresetId = value;
+  state.retargetPresetData = normalizePresetData(custom[finalName], finalName);
+
+  setRetargetProgress(0, 'Preset local "' + finalName + '" guardado.');
+}
+
+async function importRetargetPresetFile(file) {
+  if (!file) return;
+
+  try {
+    const textValue = await file.text();
+    const data = normalizePresetData(JSON.parse(textValue), stripExt(file.name));
+    applyRetargetPresetData(data, '__UNSAVED__');
+    markRetargetPresetDirty();
+    setRetargetProgress(0, 'Preset JSON importado: ' + file.name + '.');
+  } catch (error) {
+    setRetargetProgress(0, 'JSON inválido: ' + (error?.message || error));
+  } finally {
+    els.retargetPresetFileInput.value = '';
+  }
+}
+
+function openRetargetingWindow() {
+  if (state.assets.length < 1) {
+    setStatus('Importa al menos un FBX antes de abrir Retargeting.', 'warn');
+    return;
+  }
+
+  initializeRetargetPresetOptions();
+  populateRetargetRigSelects();
+
+  if (!state.retargetPairs.length) {
+    autoMatchCurrentRetargetMap();
+  } else {
+    renderRetargetPairs();
+  }
+
+  state.retargetingOpen = true;
+  els.retargetOverlay.classList.remove('is-hidden');
+  els.retargetOverlay.setAttribute('aria-hidden', 'false');
+  setRetargetProgress(0, 'Listo para retargeting.');
+}
+
+function closeRetargetingWindow() {
+  if (state.retargetBusy) return;
+  state.retargetingOpen = false;
+  els.retargetOverlay.classList.add('is-hidden');
+  els.retargetOverlay.setAttribute('aria-hidden', 'true');
+}
+
+async function applyCurrentRetargeting() {
+  if (state.retargetBusy) return;
+
+  const sourceAsset = retargetSourceAsset();
+  const targetAsset = retargetTargetAsset();
+  const sourceRecord = retargetSourceRecord();
+
+  if (!sourceAsset || !targetAsset || !sourceRecord) {
+    setRetargetProgress(0, 'Selecciona Source Rig, Target Rig y Source Action.');
+    return;
+  }
+
+  if (sourceAsset.id === targetAsset.id && !state.retargetPairs.length) {
+    setRetargetProgress(0, 'El bone map está vacío.');
+    return;
+  }
+
+  const validPairs = countValidRetargetPairs(
+    state.retargetPairs,
+    retargetBoneNames(sourceAsset),
+    retargetBoneNames(targetAsset),
+    els.retargetSourcePrefix.value.trim(),
+    els.retargetTargetPrefix.value.trim()
+  );
+
+  if (!validPairs) {
+    setRetargetProgress(0, 'No hay pares válidos entre Source y Target.');
+    return;
+  }
+
+  state.retargetBusy = true;
+  els.applyRetargetBtn.disabled = true;
+  els.closeRetargetBtn.disabled = true;
+  els.retargetCancelBtn.disabled = true;
+
+  try {
+    const preparedSourceClip = sourceRecord.clip.clone();
+    preparedSourceClip.name = sourceRecord.name || sourceRecord.clip.name;
+
+    // Reuse every Action edit the user already made in the main editor:
+    // mirror, overdrive, arm-space, limb IK, Action Transform and trim.
+    applyActionEditPipeline(
+      preparedSourceClip,
+      sourceRecord,
+      sourceAsset
+    );
+
+    const targetLabel = stripExt(targetAsset.file?.name || targetAsset.object?.name || 'Target');
+    const outputName =
+      (sourceRecord.name || 'Action') +
+      '_retarget_' +
+      targetLabel.replace(/\s+/g, '_');
+
+    const result = await buildRetargetClip({
+      sourceAsset,
+      targetAsset,
+      sourceClip: preparedSourceClip,
+      pairs: state.retargetPairs,
+      sourcePrefix: els.retargetSourcePrefix.value.trim(),
+      targetPrefix: els.retargetTargetPrefix.value.trim(),
+      autoScale: els.retargetAutoScale.checked,
+      useWorldLocation: els.retargetWorldLocation.checked,
+      sampleFps: Number(els.retargetSampleFps.value) || 30,
+      sourceRestMode: els.retargetRestMode.value,
+      sourceRestRotationOnly: els.retargetRestRotationOnly.checked,
+      headSource: els.retargetHeadSource.value.trim(),
+      headTarget: els.retargetHeadTarget.value.trim(),
+      clipName: outputName,
+      onProgress: (progress, frame, total) => {
+        setRetargetProgress(
+          progress,
+          'Retargeting · sample ' + frame + '/' + total
+        );
+      },
+    });
+
+    const clip = result.clip;
+    clip.name = outputName;
+
+    const newRecord = {
+      id: uid('clip'),
+      sourceId: targetAsset.id,
+      sourceFile: 'Retarget · ' + sourceRecord.sourceFile,
+      sourceRootName: targetAsset.object.name || '',
+      originalName: outputName,
+      name: outputName,
+      clip,
+      empty: false,
+      include: true,
+      edit: defaultActionEdit(),
+      retargetInfo: {
+        sourceAssetId: sourceAsset.id,
+        targetAssetId: targetAsset.id,
+        sourceClipId: sourceRecord.id,
+        preset: state.retargetPresetData?.name || 'Auto/Custom',
+        validPairs: result.report.validPairs,
+        totalPairs: result.report.totalPairs,
+        scaleRatio: result.report.scaleRatio,
+      },
+    };
+
+    state.clips.push(newRecord);
+    if (!targetAsset.clips.includes(newRecord.id)) {
+      targetAsset.clips.push(newRecord.id);
+    }
+
+    if (state.baseAssetId !== targetAsset.id) {
+      setBaseAsset(targetAsset.id);
+    }
+
+    renderAssets();
+    renderActions();
+    updateExportState();
+
+    playClip(newRecord.id, { silent: true });
+
+    const ikNote = els.retargetAutoBakeIk.checked
+      ? ' · FK→IK de control-rig no se hornea en navegador; el mapping IK queda conservado en el preset.'
+      : '';
+
+    setRetargetProgress(
+      1,
+      'Listo · ' +
+        result.report.validPairs +
+        '/' +
+        result.report.totalPairs +
+        ' pares · ' +
+        result.report.sampleCount +
+        ' samples' +
+        ikNote
+    );
+
+    setStatus(
+      'Retarget creado: "' + outputName + '" sobre ' + targetAsset.file.name + '.',
+      'ok'
+    );
+  } catch (error) {
+    console.error('Retargeting web falló', error);
+    setRetargetProgress(
+      0,
+      'Retargeting falló: ' + (error?.message || error)
+    );
+  } finally {
+    state.retargetBusy = false;
+    els.applyRetargetBtn.disabled = false;
+    els.closeRetargetBtn.disabled = false;
+    els.retargetCancelBtn.disabled = false;
+  }
+}
+
+els.openRetargetBtn.addEventListener('click', openRetargetingWindow);
+els.closeRetargetBtn.addEventListener('click', closeRetargetingWindow);
+els.retargetCancelBtn.addEventListener('click', closeRetargetingWindow);
+
+els.retargetOverlay.addEventListener('pointerdown', (event) => {
+  if (event.target === els.retargetOverlay) closeRetargetingWindow();
+});
+
+els.retargetSourceRig.addEventListener('change', () => {
+  populateRetargetActionSelect();
+  refreshRetargetBoneLists();
+  if (state.retargetPresetData) {
+    applyRetargetPresetData(
+      state.retargetPresetData,
+      state.retargetPresetId
+    );
+  } else {
+    autoMatchCurrentRetargetMap();
+  }
+});
+
+els.retargetTargetRig.addEventListener('change', () => {
+  refreshRetargetBoneLists();
+  if (state.retargetPresetData) {
+    applyRetargetPresetData(
+      state.retargetPresetData,
+      state.retargetPresetId
+    );
+  } else {
+    autoMatchCurrentRetargetMap();
+  }
+});
+
+els.retargetSourceAction.addEventListener('change', () => {
+  setRetargetProgress(0, 'Source Action: ' +
+    (retargetSourceRecord()?.name || '—'));
+});
+
+els.retargetPreset.addEventListener('change', loadSelectedRetargetPreset);
+els.retargetReloadPresetBtn.addEventListener('click', loadSelectedRetargetPreset);
+
+els.retargetImportPresetBtn.addEventListener('click', () => {
+  els.retargetPresetFileInput.click();
+});
+els.retargetPresetFileInput.addEventListener('change', () => {
+  importRetargetPresetFile(els.retargetPresetFileInput.files?.[0]);
+});
+
+els.retargetSavePresetBtn.addEventListener('click', saveCurrentRetargetPresetLocally);
+els.retargetExportPresetBtn.addEventListener('click', exportCurrentRetargetPreset);
+
+els.retargetSourcePrefix.addEventListener('input', () => {
+  markRetargetPresetDirty();
+  renderRetargetPairs();
+});
+els.retargetTargetPrefix.addEventListener('input', () => {
+  markRetargetPresetDirty();
+  renderRetargetPairs();
+});
+els.retargetDetectPrefixesBtn.addEventListener('click', detectCurrentRetargetPrefixes);
+
+els.retargetPairSearch.addEventListener('input', renderRetargetPairs);
+els.retargetAddPairBtn.addEventListener('click', () => addRetargetPair());
+els.retargetAddAllBtn.addEventListener('click', addAllRetargetSourceBones);
+els.retargetAutoMatchBtn.addEventListener('click', autoMatchCurrentRetargetMap);
+
+els.retargetSortAZBtn.addEventListener('click', () => {
+  state.retargetPairViewAZ = !state.retargetPairViewAZ;
+  els.retargetSortAZBtn.classList.toggle('active', state.retargetPairViewAZ);
+  renderRetargetPairs();
+});
+
+els.retargetSortStandardBtn.addEventListener('click', () => {
+  state.retargetPairs = sortRetargetPairsStandard(state.retargetPairs);
+  state.retargetPairViewAZ = false;
+  els.retargetSortAZBtn.classList.remove('active');
+  markRetargetPresetDirty();
+  renderRetargetPairs();
+});
+
+els.retargetClearPairsBtn.addEventListener('click', () => {
+  state.retargetPairs = [];
+  markRetargetPresetDirty();
+  renderRetargetPairs();
+});
+
+[
+  els.retargetAutoScale,
+  els.retargetWorldLocation,
+  els.retargetRestMode,
+  els.retargetRestRotationOnly,
+  els.retargetSampleFps,
+  els.retargetHeadSource,
+  els.retargetHeadTarget,
+].forEach((control) => {
+  control.addEventListener('change', markRetargetPresetDirty);
+});
+
+els.retargetAutoBakeIk.addEventListener('change', () => {
+  markRetargetPresetDirty();
+  if (els.retargetAutoBakeIk.checked) {
+    setRetargetProgress(
+      0,
+      'Nota: el FK→IK exacto de Rigify/ARP/CloudRig depende de constraints/drivers de Blender. El mapping se conserva, pero el bake web actual genera FK.'
+    );
+  }
+});
+
+els.retargetCustomIkEnabled.addEventListener('change', () => {
+  state.retargetCustomIkSources.enabled =
+    els.retargetCustomIkEnabled.checked;
+  markRetargetPresetDirty();
+  renderRetargetCustomIkSources();
+});
+
+els.applyRetargetBtn.addEventListener('click', applyCurrentRetargeting);
+
+window.addEventListener('keydown', (event) => {
+  if (
+    event.key === 'Escape' &&
+    state.retargetingOpen &&
+    !state.retargetBusy
+  ) {
+    event.preventDefault();
+    closeRetargetingWindow();
+  }
+});
+
+initializeRetargetPresetOptions();
+
+
 els.exportFbxBtn.addEventListener('click', exportFBX);
 els.exportGlbBtn.addEventListener('click', exportGLB);
 
