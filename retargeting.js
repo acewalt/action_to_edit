@@ -315,6 +315,7 @@ export async function buildRetargetClip({
   sampleFps = 30,
   sourceRestMode = 'original',
   sourceRestRotationOnly = true,
+  sourceRestOverride = null,
   headSource = '',
   headTarget = '',
   clipName = 'Retargeted',
@@ -397,27 +398,20 @@ export async function buildRetargetClip({
   let sourceRest = originalSourceRest;
   if (sourceRestMode === 'firstFrame') {
     sourceMixer.setTime(0);
-    sourceRoot.updateMatrixWorld(true);
+    sourceContainer.updateMatrixWorld(true);
     const sampled = captureBonePose(sourceRoot);
+    sourceRest = sourceRestRotationOnly
+      ? mergeRotationOnlyRest(originalSourceRest, sampled)
+      : sampled;
+  } else if (sourceRestMode === 'manual' && sourceRestOverride) {
+    applyRestPose(sourceRoot, sourceAsset.restPose);
+    applyBonePoseOverride(sourceRoot, sourceRestOverride);
+    sourceContainer.updateMatrixWorld(true);
 
-    if (sourceRestRotationOnly) {
-      sourceRest = new Map();
-      for (const [name, original] of originalSourceRest) {
-        const first = sampled.get(name);
-        sourceRest.set(name, {
-          ...clonePoseEntry(original),
-          worldQuaternion: first?.worldQuaternion?.clone() || original.worldQuaternion.clone(),
-          localQuaternion: first?.localQuaternion?.clone() || original.localQuaternion.clone(),
-          worldMatrix: composeMatrix(
-            original.worldPosition,
-            first?.worldQuaternion || original.worldQuaternion,
-            original.worldScale
-          ),
-        });
-      }
-    } else {
-      sourceRest = sampled;
-    }
+    const sampled = captureBonePose(sourceRoot);
+    sourceRest = sourceRestRotationOnly
+      ? mergeRotationOnlyRest(originalSourceRest, sampled)
+      : sampled;
   }
 
   applyRestPose(sourceRoot, sourceAsset.restPose);
@@ -715,6 +709,91 @@ export async function buildRetargetClip({
       mappedBones: targetOrder,
     },
   };
+}
+
+function mergeRotationOnlyRest(originalPose, sampledPose) {
+  const merged = new Map();
+
+  for (const [name, original] of originalPose) {
+    const sampled = sampledPose.get(name);
+    const worldQuaternion =
+      sampled?.worldQuaternion?.clone() ||
+      original.worldQuaternion.clone();
+
+    merged.set(name, {
+      ...clonePoseEntry(original),
+      worldQuaternion,
+      localQuaternion:
+        sampled?.localQuaternion?.clone() ||
+        original.localQuaternion.clone(),
+      worldMatrix: composeMatrix(
+        original.worldPosition,
+        worldQuaternion,
+        original.worldScale
+      ),
+    });
+  }
+
+  return merged;
+}
+
+function applyBonePoseOverride(root, override) {
+  if (!override) return;
+
+  const entries = override instanceof Map
+    ? override
+    : new Map(Object.entries(override));
+
+  root.traverse((node) => {
+    if (!node.isBone || !node.name) return;
+
+    const value = entries.get(node.name);
+    if (!value) return;
+
+    const position = value.position;
+    const quaternion = value.quaternion;
+    const scale = value.scale;
+
+    if (position) {
+      if (Array.isArray(position)) {
+        node.position.fromArray(position);
+      } else {
+        node.position.set(
+          Number(position.x) || 0,
+          Number(position.y) || 0,
+          Number(position.z) || 0
+        );
+      }
+    }
+
+    if (quaternion) {
+      if (Array.isArray(quaternion)) {
+        node.quaternion.fromArray(quaternion);
+      } else {
+        node.quaternion.set(
+          Number(quaternion.x) || 0,
+          Number(quaternion.y) || 0,
+          Number(quaternion.z) || 0,
+          Number.isFinite(Number(quaternion.w)) ? Number(quaternion.w) : 1
+        );
+      }
+      node.quaternion.normalize();
+    }
+
+    if (scale) {
+      if (Array.isArray(scale)) {
+        node.scale.fromArray(scale);
+      } else {
+        node.scale.set(
+          Number(scale.x) || 1,
+          Number(scale.y) || 1,
+          Number(scale.z) || 1
+        );
+      }
+    }
+  });
+
+  root.updateMatrixWorld(true);
 }
 
 function applyRestPose(object, restPose) {
