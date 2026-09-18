@@ -516,14 +516,16 @@ button { color: inherit; }
   line-height: 1.35;
 }
 
-.gizmo-mode-buttons {
+.combined-gizmo-row {
+  grid-template-columns: 1fr;
+}
+.combined-gizmo-button {
+  width: 100%;
+}
+.combined-gizmo-snaps {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 5px;
-  min-width: 0;
-}
-.gizmo-tool-row-extended {
-  grid-template-columns: minmax(0, 1fr) 78px;
+  gap: 6px;
 }
 .transform-value-group {
   margin-top: 9px;
