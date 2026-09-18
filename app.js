@@ -219,6 +219,31 @@ limbRotateControls.enabled = false;
 scene.add(limbRotateControls.getHelper());
 limbRotateControls.getHelper().visible = false;
 
+const GIZMO_AXIS_COLORS = {
+  x: 0xff3b4f,
+  y: 0x42d66b,
+  z: 0x3f7cff,
+  active: 0xffd84a,
+};
+
+function applyStandardGizmoColors(control) {
+  control.setColors(
+    GIZMO_AXIS_COLORS.x,
+    GIZMO_AXIS_COLORS.y,
+    GIZMO_AXIS_COLORS.z,
+    GIZMO_AXIS_COLORS.active
+  );
+}
+
+// Same exact Blender-style axis convention on every transform control:
+// X red · Y green · Z blue.
+[
+  rootTransformControls,
+  rootRotateControls,
+  limbTransformControls,
+  limbRotateControls,
+].forEach(applyStandardGizmoColors);
+
 const hemi = new THREE.HemisphereLight(0xffffff, 0x20252b, 2.0);
 scene.add(hemi);
 const key = new THREE.DirectionalLight(0xffffff, 3.0);
