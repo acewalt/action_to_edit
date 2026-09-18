@@ -2725,12 +2725,26 @@ function updateRootRotateDrag() {
   const currentProxyQuaternion = new THREE.Quaternion();
   rootGizmoProxy.getWorldQuaternion(currentProxyQuaternion);
 
+  // TransformControls is WORLD/GLOBAL. Compute the world-space rotation delta.
   const deltaWorld = currentProxyQuaternion
     .clone()
     .multiply(drag.startProxyQuaternion.clone().invert())
     .normalize();
 
-  const nextEditQuaternion = deltaWorld
+  // The Action Transform quaternion itself is LOCAL to previewStage/exportContainer.
+  // Convert the world delta into that parent space before composing it:
+  // deltaLocal = P^-1 * deltaWorld * P
+  const parentWorld = drag.parentWorldQuaternion.clone().normalize();
+  const deltaLocal = parentWorld
+    .clone()
+    .invert()
+    .multiply(deltaWorld)
+    .multiply(parentWorld)
+    .normalize();
+
+  // Compose directly in quaternion space. No Euler accumulation and therefore
+  // no gimbal-lock / ±180° axis reassignment while dragging.
+  const nextEditQuaternion = deltaLocal
     .clone()
     .multiply(drag.startEditQuaternion)
     .normalize();
@@ -2738,13 +2752,8 @@ function updateRootRotateDrag() {
   storeEditQuaternion(edit, nextEditQuaternion);
   updateRootOffsetFields(edit, { live: true });
 
-  const localQuaternion = drag.parentWorldQuaternion
-    .clone()
-    .invert()
-    .multiply(nextEditQuaternion)
-    .normalize();
-
-  drag.target.quaternion.copy(localQuaternion);
+  // Stored quaternion and node.localQuaternion now represent the same thing.
+  drag.target.quaternion.copy(nextEditQuaternion);
   drag.target.updateMatrixWorld(true);
 }
 
