@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#101216" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-13" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-16" />
   <script type="importmap">
   {
     "imports": {
@@ -165,22 +165,30 @@
                     <option value="object">Objeto root</option>
                   </select>
 
-                  <div class="gizmo-tool-row gizmo-tool-row-extended">
-                    <div class="gizmo-mode-buttons">
-                      <button id="toggleRootGizmoBtn" class="gizmo-tool-button" type="button">Mover</button>
-                      <button id="rotateRootGizmoBtn" class="gizmo-tool-button" type="button">Rotar</button>
+                  <div class="gizmo-tool-row combined-gizmo-row">
+                    <button id="toggleRootGizmoBtn" class="gizmo-tool-button combined-gizmo-button" type="button">Transformar en viewport</button>
+                    <div class="combined-gizmo-snaps">
+                      <label class="gizmo-snap-control">
+                        <span>Mover</span>
+                        <select id="rootMoveSnapSelect">
+                          <option value="0.1">0.1</option>
+                          <option value="0.25">0.25</option>
+                          <option value="0.5" selected>0.5</option>
+                          <option value="1">1.0</option>
+                        </select>
+                      </label>
+                      <label class="gizmo-snap-control">
+                        <span>Rotar</span>
+                        <select id="rootRotateSnapSelect">
+                          <option value="1">1°</option>
+                          <option value="5" selected>5°</option>
+                          <option value="10">10°</option>
+                          <option value="15">15°</option>
+                        </select>
+                      </label>
                     </div>
-                    <label class="gizmo-snap-control">
-                      <span id="rootGizmoPrecisionLabel">Precisión</span>
-                      <select id="rootGizmoSnap">
-                        <option value="0.1">0.1</option>
-                        <option value="0.25">0.25</option>
-                        <option value="0.5" selected>0.5</option>
-                        <option value="1">1.0</option>
-                      </select>
-                    </label>
                   </div>
-                  <small id="rootGizmoHelp" class="gizmo-help">Mover: arrastra X/Y/Z. El desplazamiento se ajusta al paso seleccionado.</small>
+                  <small id="rootGizmoHelp" class="gizmo-help">Flechas = mover · aros = rotar en ejes globales. Ambos se actualizan en tiempo real.</small>
 
                   <div class="transform-value-group">
                     <span class="transform-value-title">Posición</span>
@@ -199,7 +207,7 @@
                       <label><span>Y</span><input id="rootRotationY" type="number" step="1" value="0" /></label>
                       <label><span>Z</span><input id="rootRotationZ" type="number" step="1" value="0" /></label>
                     </div>
-                    <small>Rotación local por Action · grados</small>
+                    <small>Rotación global por Action · grados</small>
                   </div>
                 </div>
               </div>
@@ -334,6 +342,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-15"></script>
+  <script type="module" src="./app.js?v=20260918-16"></script>
 </body>
 </html>
