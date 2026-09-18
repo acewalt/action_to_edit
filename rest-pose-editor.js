@@ -366,8 +366,8 @@ export class RestPoseEditor {
     this.sourceRoot.animations = [];
     this.targetRoot.animations = [];
 
-    applyRestPose(this.sourceRoot, sourceAsset.restPose);
-    applyRestPose(this.targetRoot, targetAsset.restPose);
+    restoreAssetRest(this.sourceRoot, sourceAsset);
+    restoreAssetRest(this.targetRoot, targetAsset);
 
     prepareRestPoseMeshes(this.sourceRoot);
     prepareRestPoseMeshes(this.targetRoot);
@@ -387,17 +387,17 @@ export class RestPoseEditor {
     }
 
     cloneMaterialsForPreview(this.sourceRoot, {
-      opacity: 0.82,
+      opacity: 0.96,
       wireframe: false,
       depthWrite: true,
-      tint: 0xb9c5d0,
+      tint: 0xbfc3c8,
     });
 
     cloneMaterialsForPreview(this.targetRoot, {
-      opacity: 0.42,
+      opacity: 0.58,
       wireframe: false,
       depthWrite: false,
-      tint: 0xd8b477,
+      tint: 0x8f969e,
     });
 
     this.alignForComparison();
@@ -490,55 +490,54 @@ export class RestPoseEditor {
     if (!this.sourceRoot || !this.targetRoot) return;
 
     this.sourceGroup.position.set(0, 0, 0);
+    this.sourceGroup.quaternion.identity();
     this.sourceGroup.scale.set(1, 1, 1);
 
     this.targetGroup.position.set(0, 0, 0);
+    this.targetGroup.quaternion.identity();
     this.targetGroup.scale.set(1, 1, 1);
 
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
 
-    const sourceDisplayBones = chooseDisplayBoneSet(this.sourceBones);
-    const targetDisplayBones = chooseDisplayBoneSet(this.targetBones);
+    // IMPORTANT: Auto-scale to Target belongs to the RETARGET BAKE. It should
+    // not visually rescale the characters in Redefine Rest Pose. This viewport
+    // preserves each FBX's real imported proportions so a child rig remains
+    // smaller than an adult rig, exactly like in Blender.
+    this.displayScaleRatio = 1;
 
-    const sourceHeight = computeBoneHeight(
-      this.sourceBones,
-      sourceDisplayBones
-    );
-    const targetHeight = computeBoneHeight(
-      this.targetBones,
-      targetDisplayBones
-    );
+    const sourceSet = chooseDisplayBoneSet(this.sourceBones);
+    const targetSet = chooseDisplayBoneSet(this.targetBones);
 
-    this.displayScaleRatio =
-      this.autoScale && sourceHeight > 1e-8 && targetHeight > 1e-8
-        ? targetHeight / sourceHeight
-        : 1;
-
-    this.sourceGroup.scale.setScalar(this.displayScaleRatio);
-    this.sourceGroup.updateMatrixWorld(true);
-    this.targetGroup.updateMatrixWorld(true);
-
-    // Align using the actual deform/FK skeleton, not every control bone or
-    // custom-shape object exported by a control rig. This is critical for
-    // CloudRig/Sintel FBXs where helper controls can sit far away from the body.
-    const sourceBox = boxFromBones(
-      this.sourceBones,
-      sourceDisplayBones
-    );
-    const targetBox = boxFromBones(
-      this.targetBones,
-      targetDisplayBones
-    );
+    let sourceBox = boxFromBones(this.sourceBones, sourceSet);
+    let targetBox = boxFromBones(this.targetBones, targetSet);
 
     if (!sourceBox || !targetBox) return;
 
-    const sourceCenter = sourceBox.getCenter(new THREE.Vector3());
-    const targetCenter = targetBox.getCenter(new THREE.Vector3());
+    // Put both rigs upright on the same floor and side-by-side. This keeps
+    // their original scale while making the rest poses easy to compare.
+    this.sourceGroup.position.y -= sourceBox.min.y;
+    this.targetGroup.position.y -= targetBox.min.y;
 
-    this.sourceGroup.position.x += targetCenter.x - sourceCenter.x;
-    this.sourceGroup.position.z += targetCenter.z - sourceCenter.z;
-    this.sourceGroup.position.y += targetBox.min.y - sourceBox.min.y;
+    this.sourceGroup.updateMatrixWorld(true);
+    this.targetGroup.updateMatrixWorld(true);
+
+    sourceBox = boxFromBones(this.sourceBones, sourceSet);
+    targetBox = boxFromBones(this.targetBones, targetSet);
+
+    const sourceHeight = Math.max(sourceBox.max.y - sourceBox.min.y, 0.001);
+    const targetHeight = Math.max(targetBox.max.y - targetBox.min.y, 0.001);
+    const maxHeight = Math.max(sourceHeight, targetHeight);
+
+    const gap = maxHeight * 0.18;
+
+    // Source on the left, Target on the right.
+    this.sourceGroup.position.x += (-gap * 0.5) - sourceBox.max.x;
+    this.targetGroup.position.x += ( gap * 0.5) - targetBox.min.x;
+
+    // Center both rigs on depth so they are directly comparable from front view.
+    this.sourceGroup.position.z -= (sourceBox.min.z + sourceBox.max.z) * 0.5;
+    this.targetGroup.position.z -= (targetBox.min.z + targetBox.max.z) * 0.5;
 
     this.sourceGroup.updateMatrixWorld(true);
     this.targetGroup.updateMatrixWorld(true);
@@ -546,12 +545,11 @@ export class RestPoseEditor {
 
   setAutoScale(enabled) {
     this.autoScale = Boolean(enabled);
+    // The checkbox still controls bake scaling in retargeting.js.
+    // Redefine Rest Pose intentionally keeps original FBX proportions.
     if (!this.sourceRoot || !this.targetRoot) return;
-
-    this.alignForComparison();
     this.updateSkeletonLines();
     this.updateMarkers();
-    this.fit();
   }
 
   getSourceBoneNames() {
@@ -649,7 +647,7 @@ export class RestPoseEditor {
   resetAll() {
     if (!this.sourceRoot || !this.sourceAsset?.restPose) return;
 
-    applyRestPose(this.sourceRoot, this.sourceAsset.restPose);
+    restoreAssetRest(this.sourceRoot, this.sourceAsset);
     this.sourceRoot.updateMatrixWorld(true);
 
     this.updateSkeletonLines();
@@ -777,7 +775,7 @@ export class RestPoseEditor {
   applyPose(pose) {
     if (!this.sourceRoot || !pose) return;
 
-    applyRestPose(this.sourceRoot, this.sourceAsset?.restPose);
+    restoreAssetRest(this.sourceRoot, this.sourceAsset);
     applyBonePoseOverride(this.sourceRoot, pose);
 
     this.sourceRoot.updateMatrixWorld(true);
@@ -842,7 +840,7 @@ export class RestPoseEditor {
       0.1
     );
 
-    const geometry = new THREE.TorusGeometry(1, 0.055, 8, 40);
+    const geometry = new THREE.TorusGeometry(1, 0.085, 10, 48);
     this.poseHandleGeometry = geometry;
 
     const candidates = choosePoseHandleBones(this.sourceBones);
@@ -851,7 +849,7 @@ export class RestPoseEditor {
       const material = new THREE.MeshBasicMaterial({
         color: 0x6eaef2,
         transparent: true,
-        opacity: 0.45,
+        opacity: 0.95,
         depthTest: false,
         side: THREE.DoubleSide,
       });
@@ -859,7 +857,7 @@ export class RestPoseEditor {
       const handle = new THREE.Mesh(geometry, material);
       const semantic = semanticNameForHandle(bone.name);
 
-      let scale = sourceHeight * 0.052;
+      let scale = sourceHeight * 0.072;
       if (/hips|spine|chest|head|neck/.test(semantic)) {
         scale *= 1.35;
       } else if (/hand|foot/.test(semantic)) {
@@ -873,7 +871,7 @@ export class RestPoseEditor {
       handle.userData.boneName = bone.name;
       handle.userData.bone = bone;
       handle.userData.semantic = semantic;
-      handle.renderOrder = 32;
+      handle.renderOrder = 80;
 
       this.poseHandleGroup.add(handle);
       this.poseHandles.push(handle);
@@ -1455,6 +1453,52 @@ function captureWorldQuaternions(bones) {
   }
 
   return result;
+}
+
+function restoreHierarchySnapshot(root, snapshot) {
+  if (!root || !Array.isArray(snapshot) || !snapshot.length) return false;
+
+  const nodes = [];
+  root.traverse((node) => nodes.push(node));
+
+  if (nodes.length !== snapshot.length) {
+    return false;
+  }
+
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    const rest = snapshot[i];
+    if (!rest) continue;
+
+    if (Array.isArray(rest.position)) node.position.fromArray(rest.position);
+    if (Array.isArray(rest.quaternion)) node.quaternion.fromArray(rest.quaternion);
+    if (Array.isArray(rest.scale)) node.scale.fromArray(rest.scale);
+    node.visible = rest.visible !== false;
+  }
+
+  root.updateMatrixWorld(true);
+
+  root.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.update();
+    }
+  });
+
+  return true;
+}
+
+function restoreAssetRest(root, asset) {
+  if (!root || !asset) return;
+
+  // New imports use an exact traversal snapshot captured immediately after
+  // FBXLoader parsing. This restores object/root rotations and scales as well
+  // as bones, and avoids collisions from duplicate control names.
+  if (restoreHierarchySnapshot(root, asset.restHierarchy)) {
+    return;
+  }
+
+  // Backward-compatible fallback for assets imported before v39.
+  applyRestPose(root, asset.restPose);
 }
 
 function applyRestPose(object, restPose) {
