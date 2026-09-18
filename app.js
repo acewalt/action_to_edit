@@ -17,8 +17,8 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-30';
-import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-30';
+} from './retargeting.js?v=20260918-31';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-31';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -5358,6 +5358,7 @@ function openRetargetingWindow() {
   els.retargetOverlay.classList.remove('is-hidden');
   els.retargetOverlay.setAttribute('aria-hidden', 'false');
   setRetargetProgress(0, 'Listo para retargeting.');
+  switchRetargetWorkspace(state.retargetWorkspace);
 
   if (state.retargetWorkspace === 'rest') {
     requestAnimationFrame(() => rebuildRetargetRestEditor());
