@@ -60,9 +60,15 @@ const els = {
   rootOffsetX: $('#rootOffsetX'),
   rootOffsetY: $('#rootOffsetY'),
   rootOffsetZ: $('#rootOffsetZ'),
+  rootRotationX: $('#rootRotationX'),
+  rootRotationY: $('#rootRotationY'),
+  rootRotationZ: $('#rootRotationZ'),
   resetRootOffsetBtn: $('#resetRootOffsetBtn'),
   toggleRootGizmoBtn: $('#toggleRootGizmoBtn'),
+  rotateRootGizmoBtn: $('#rotateRootGizmoBtn'),
   rootGizmoSnap: $('#rootGizmoSnap'),
+  rootGizmoPrecisionLabel: $('#rootGizmoPrecisionLabel'),
+  rootGizmoHelp: $('#rootGizmoHelp'),
   toggleSkeletonBtn: $('#toggleSkeletonBtn'),
   fitCameraBtn: $('#fitCameraBtn'),
   statusBar: $('#statusBar'),
@@ -97,6 +103,9 @@ const state = {
   blenderNavDrag: null,
   motionPanelOpen: true,
   rootGizmoEnabled: false,
+  rootGizmoMode: 'translate',
+  rootMoveSnap: 0.5,
+  rootRotateSnap: 5,
   rootGizmoDragging: false,
   rootGizmoDrag: null,
   isScrubbing: false,
@@ -215,6 +224,7 @@ function defaultActionEdit() {
     mirror: false,
     rootTarget: 'auto',
     rootOffset: { x: 0, y: 0, z: 0 },
+    rootRotation: { x: 0, y: 0, z: 0 },
   };
 }
 
@@ -222,6 +232,7 @@ function ensureActionEdit(record) {
   if (!record) return defaultActionEdit();
   if (!record.edit) record.edit = defaultActionEdit();
   if (!record.edit.rootOffset) record.edit.rootOffset = { x: 0, y: 0, z: 0 };
+  if (!record.edit.rootRotation) record.edit.rootRotation = { x: 0, y: 0, z: 0 };
   return record.edit;
 }
 
@@ -408,6 +419,77 @@ function applyRootOffset(clip, record, baseAsset) {
   ));
 }
 
+function applyRootRotation(clip, record, baseAsset) {
+  const edit = ensureActionEdit(record);
+  const rotation = edit.rootRotation || { x: 0, y: 0, z: 0 };
+  const rx = Number(rotation.x) || 0;
+  const ry = Number(rotation.y) || 0;
+  const rz = Number(rotation.z) || 0;
+
+  if (Math.abs(rx) + Math.abs(ry) + Math.abs(rz) < 1e-9) return;
+
+  const targetName = resolveRootTarget(record, baseAsset);
+  if (!targetName) return;
+
+  const offsetQuaternion = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(
+      THREE.MathUtils.degToRad(rx),
+      THREE.MathUtils.degToRad(ry),
+      THREE.MathUtils.degToRad(rz),
+      'XYZ'
+    )
+  );
+
+  let quaternionTrack = null;
+
+  for (const track of clip.tracks) {
+    let parsed;
+    try {
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    } catch {
+      continue;
+    }
+
+    if (parsed.nodeName === targetName && parsed.propertyName === 'quaternion') {
+      quaternionTrack = track;
+      break;
+    }
+  }
+
+  const q = new THREE.Quaternion();
+
+  if (quaternionTrack) {
+    for (let i = 0; i < quaternionTrack.values.length; i += 4) {
+      q.set(
+        quaternionTrack.values[i],
+        quaternionTrack.values[i + 1],
+        quaternionTrack.values[i + 2],
+        quaternionTrack.values[i + 3]
+      ).normalize();
+
+      q.multiply(offsetQuaternion).normalize();
+
+      quaternionTrack.values[i] = q.x;
+      quaternionTrack.values[i + 1] = q.y;
+      quaternionTrack.values[i + 2] = q.z;
+      quaternionTrack.values[i + 3] = q.w;
+    }
+    return;
+  }
+
+  const rest = baseAsset?.restPose?.get(targetName);
+  if (!rest) return;
+
+  q.copy(rest.quaternion).multiply(offsetQuaternion).normalize();
+
+  const duration = Math.max(clip.duration || 0, 1 / 30);
+  clip.tracks.push(new THREE.QuaternionKeyframeTrack(
+    targetName + '.quaternion',
+    [0, duration],
+    [q.x, q.y, q.z, q.w, q.x, q.y, q.z, q.w]
+  ));
+}
+
 function trimClipByPercent(clip, startPct, endPct) {
   const duration = Math.max(clip.duration || 0, 0);
   const start = THREE.MathUtils.clamp(Number(startPct) || 0, 0, 100) / 100 * duration;
@@ -463,6 +545,7 @@ function applyActionEditPipeline(clip, record, baseAsset) {
   applyOverdrive(clip, edit.overdrive);
   applyArmSpace(clip, edit.armSpace);
   applyRootOffset(clip, record, baseAsset);
+  applyRootRotation(clip, record, baseAsset);
   trimClipByPercent(clip, edit.trimStart, edit.trimEnd);
 
   clip.resetDuration();
@@ -895,10 +978,76 @@ function roundOffsetValue(value, step) {
 
 function updateRootOffsetFields(edit) {
   if (!edit) return;
-  updateRootOffsetFields(edit);
-  els.toggleRootGizmoBtn.classList.toggle('active', state.rootGizmoEnabled);
-  els.toggleRootGizmoBtn.textContent = state.rootGizmoEnabled ? 'Mover activo' : 'Mover en viewport';
-  requestAnimationFrame(updateRootGizmoAttachment);
+
+  els.rootOffsetX.value = String(edit.rootOffset?.x ?? 0);
+  els.rootOffsetY.value = String(edit.rootOffset?.y ?? 0);
+  els.rootOffsetZ.value = String(edit.rootOffset?.z ?? 0);
+
+  els.rootRotationX.value = String(edit.rootRotation?.x ?? 0);
+  els.rootRotationY.value = String(edit.rootRotation?.y ?? 0);
+  els.rootRotationZ.value = String(edit.rootRotation?.z ?? 0);
+}
+
+function configureRootGizmoModeUi() {
+  const rotate = state.rootGizmoMode === 'rotate';
+
+  els.toggleRootGizmoBtn.classList.toggle(
+    'active',
+    state.rootGizmoEnabled && !rotate
+  );
+  els.rotateRootGizmoBtn.classList.toggle(
+    'active',
+    state.rootGizmoEnabled && rotate
+  );
+
+  els.toggleRootGizmoBtn.textContent =
+    state.rootGizmoEnabled && !rotate ? 'Mover activo' : 'Mover';
+  els.rotateRootGizmoBtn.textContent =
+    state.rootGizmoEnabled && rotate ? 'Rotar activo' : 'Rotar';
+
+  els.rootGizmoPrecisionLabel.textContent = rotate
+    ? 'Snap °'
+    : 'Precisión';
+
+  const values = rotate
+    ? [
+        ['1', '1°'],
+        ['5', '5°'],
+        ['10', '10°'],
+        ['15', '15°'],
+      ]
+    : [
+        ['0.1', '0.1'],
+        ['0.25', '0.25'],
+        ['0.5', '0.5'],
+        ['1', '1.0'],
+      ];
+
+  const selected = rotate
+    ? String(state.rootRotateSnap)
+    : String(state.rootMoveSnap);
+
+  els.rootGizmoSnap.innerHTML = values
+    .map(([value, label]) =>
+      '<option value="' + value + '">' + label + '</option>'
+    )
+    .join('');
+
+  els.rootGizmoSnap.value = selected;
+
+  els.rootGizmoHelp.textContent = rotate
+    ? 'Rotar: arrastra los aros X/Y/Z. La rotación usa snap angular para mantener ajustes exactos.'
+    : 'Mover: arrastra X/Y/Z. El desplazamiento se ajusta al paso seleccionado.';
+
+  rootTransformControls.setMode(rotate ? 'rotate' : 'translate');
+  rootTransformControls.setSpace(rotate ? 'local' : 'world');
+
+  rootTransformControls.setTranslationSnap(
+    rotate ? null : Number(state.rootMoveSnap)
+  );
+  rootTransformControls.setRotationSnap(
+    rotate ? THREE.MathUtils.degToRad(Number(state.rootRotateSnap)) : null
+  );
 }
 
 function hideRootGizmo() {
@@ -929,9 +1078,17 @@ function updateRootGizmoAttachment() {
 
   target.updateWorldMatrix(true, false);
   target.getWorldPosition(rootGizmoProxy.position);
-  rootGizmoProxy.quaternion.identity();
+
+  if (state.rootGizmoMode === 'rotate') {
+    target.getWorldQuaternion(rootGizmoProxy.quaternion);
+  } else {
+    rootGizmoProxy.quaternion.identity();
+  }
+
   rootGizmoProxy.scale.set(1, 1, 1);
   rootGizmoProxy.updateMatrixWorld(true);
+
+  configureRootGizmoModeUi();
 
   if (rootTransformControls.object !== rootGizmoProxy) {
     rootTransformControls.attach(rootGizmoProxy);
@@ -952,6 +1109,11 @@ function updateRootGizmoPosition() {
 
   target.updateWorldMatrix(true, false);
   target.getWorldPosition(rootGizmoProxy.position);
+
+  if (state.rootGizmoMode === 'rotate') {
+    target.getWorldQuaternion(rootGizmoProxy.quaternion);
+  }
+
   rootGizmoProxy.updateMatrixWorld(true);
 }
 
@@ -1023,9 +1185,8 @@ function renderMotionPanel() {
         ? 'Objeto → ' + (base.object.name || 'root')
         : edit.rootTarget;
 
-  els.rootOffsetX.value = String(edit.rootOffset.x ?? 0);
-  els.rootOffsetY.value = String(edit.rootOffset.y ?? 0);
-  els.rootOffsetZ.value = String(edit.rootOffset.z ?? 0);
+  updateRootOffsetFields(edit);
+  configureRootGizmoModeUi();
 }
 
 function selectActionForEditing(recordId, { openPanel = true } = {}) {
@@ -2163,6 +2324,7 @@ function clearAll() {
   state.activeClipId = null;
   state.skeletonHelper = null;
   state.rootGizmoEnabled = false;
+  state.rootGizmoMode = 'translate';
   state.rootGizmoDragging = false;
   state.rootGizmoDrag = null;
   state.axisViewActive = false;
@@ -2338,11 +2500,29 @@ els.rootOffsetX.addEventListener('input', syncRootOffset);
 els.rootOffsetY.addEventListener('input', syncRootOffset);
 els.rootOffsetZ.addEventListener('input', syncRootOffset);
 
+function syncRootRotation() {
+  const record = getActiveRecord();
+  if (!record) return;
+
+  const edit = ensureActionEdit(record);
+  edit.rootRotation.x = Number(els.rootRotationX.value) || 0;
+  edit.rootRotation.y = Number(els.rootRotationY.value) || 0;
+  edit.rootRotation.z = Number(els.rootRotationZ.value) || 0;
+
+  refreshActivePreview();
+  requestAnimationFrame(updateRootGizmoAttachment);
+}
+
+els.rootRotationX.addEventListener('input', syncRootRotation);
+els.rootRotationY.addEventListener('input', syncRootRotation);
+els.rootRotationZ.addEventListener('input', syncRootRotation);
+
 els.resetRootOffsetBtn.addEventListener('click', () => {
   const record = getActiveRecord();
   if (!record) return;
   const edit = ensureActionEdit(record);
   edit.rootOffset = { x: 0, y: 0, z: 0 };
+  edit.rootRotation = { x: 0, y: 0, z: 0 };
   renderMotionPanel();
   refreshActivePreview();
   requestAnimationFrame(updateRootGizmoAttachment);
@@ -2356,29 +2536,61 @@ els.resetMotionPanelBtn.addEventListener('click', () => {
   refreshActivePreview();
 });
 
-els.toggleRootGizmoBtn.addEventListener('click', () => {
+function setRootGizmoMode(mode) {
   const record = getActiveRecord();
   const base = getBaseAsset();
+
   if (!record || !base || isEmptyClip(record)) {
-    setStatus('Selecciona y reproduce una Action antes de mover su root.', 'warn');
+    setStatus('Selecciona y reproduce una Action antes de transformar su root.', 'warn');
     return;
   }
 
-  state.rootGizmoEnabled = !state.rootGizmoEnabled;
-  renderMotionPanel();
+  const nextMode = mode === 'rotate' ? 'rotate' : 'translate';
+
+  if (state.rootGizmoEnabled && state.rootGizmoMode === nextMode) {
+    state.rootGizmoEnabled = false;
+  } else {
+    state.rootGizmoEnabled = true;
+    state.rootGizmoMode = nextMode;
+  }
+
+  configureRootGizmoModeUi();
   updateRootGizmoAttachment();
 
-  setStatus(
-    state.rootGizmoEnabled
-      ? 'Herramienta de traslación activa. Arrastra X, Y o Z sobre el viewport.'
-      : 'Herramienta de traslación desactivada.',
-    'info'
-  );
+  if (!state.rootGizmoEnabled) {
+    setStatus('Gizmo de transformación desactivado.', 'info');
+  } else if (nextMode === 'rotate') {
+    setStatus('Rotación activa. Arrastra los aros X, Y o Z.', 'info');
+  } else {
+    setStatus('Traslación activa. Arrastra los ejes X, Y o Z.', 'info');
+  }
+}
+
+els.toggleRootGizmoBtn.addEventListener('click', () => {
+  setRootGizmoMode('translate');
+});
+
+els.rotateRootGizmoBtn.addEventListener('click', () => {
+  setRootGizmoMode('rotate');
 });
 
 els.rootGizmoSnap.addEventListener('change', () => {
-  const step = Number(els.rootGizmoSnap.value) || 0.5;
-  setStatus('Precisión del gizmo: pasos de ' + step + ' unidades FBX.', 'info');
+  const value = Number(els.rootGizmoSnap.value);
+
+  if (state.rootGizmoMode === 'rotate') {
+    state.rootRotateSnap = Number.isFinite(value) ? value : 5;
+    rootTransformControls.setRotationSnap(
+      THREE.MathUtils.degToRad(state.rootRotateSnap)
+    );
+    setStatus('Snap de rotación: ' + state.rootRotateSnap + '°.', 'info');
+  } else {
+    state.rootMoveSnap = Number.isFinite(value) ? value : 0.5;
+    rootTransformControls.setTranslationSnap(state.rootMoveSnap);
+    setStatus(
+      'Precisión de movimiento: ' + state.rootMoveSnap + ' unidades FBX.',
+      'info'
+    );
+  }
 });
 
 rootTransformControls.addEventListener('mouseDown', () => {
@@ -2392,20 +2604,31 @@ rootTransformControls.addEventListener('mouseDown', () => {
 
   const edit = ensureActionEdit(record);
   const startWorld = new THREE.Vector3();
+  const startProxyQuaternion = new THREE.Quaternion();
+
   rootGizmoProxy.getWorldPosition(startWorld);
+  rootGizmoProxy.getWorldQuaternion(startProxyQuaternion);
 
   target.updateWorldMatrix(true, false);
 
   state.rootGizmoDrag = {
     recordId: record.id,
+    mode: state.rootGizmoMode,
     target,
     parent: target.parent || null,
     startWorld,
+    startProxyQuaternion,
     startTargetLocal: target.position.clone(),
+    startTargetQuaternion: target.quaternion.clone(),
     startOffset: new THREE.Vector3(
       Number(edit.rootOffset.x) || 0,
       Number(edit.rootOffset.y) || 0,
       Number(edit.rootOffset.z) || 0
+    ),
+    startRotation: new THREE.Vector3(
+      Number(edit.rootRotation.x) || 0,
+      Number(edit.rootRotation.y) || 0,
+      Number(edit.rootRotation.z) || 0
     ),
     time: state.currentAction?.time || 0,
     wasPaused: Boolean(state.currentAction?.paused),
@@ -2417,12 +2640,75 @@ rootTransformControls.addEventListener('mouseDown', () => {
 rootTransformControls.addEventListener('objectChange', () => {
   const drag = state.rootGizmoDrag;
   const record = getActiveRecord();
-  if (!state.rootGizmoDragging || !drag || !record || record.id !== drag.recordId) return;
+
+  if (
+    !state.rootGizmoDragging ||
+    !drag ||
+    !record ||
+    record.id !== drag.recordId
+  ) {
+    return;
+  }
+
+  const edit = ensureActionEdit(record);
+
+  if (drag.mode === 'rotate') {
+    const currentProxyQuaternion = rootGizmoProxy.quaternion.clone().normalize();
+
+    const deltaQuaternion = drag.startProxyQuaternion
+      .clone()
+      .invert()
+      .multiply(currentProxyQuaternion)
+      .normalize();
+
+    const deltaEuler = new THREE.Euler().setFromQuaternion(
+      deltaQuaternion,
+      'XYZ'
+    );
+
+    const snap = Math.max(Number(state.rootRotateSnap) || 5, 0.0001);
+
+    const nextX = roundOffsetValue(
+      drag.startRotation.x + THREE.MathUtils.radToDeg(deltaEuler.x),
+      snap
+    );
+    const nextY = roundOffsetValue(
+      drag.startRotation.y + THREE.MathUtils.radToDeg(deltaEuler.y),
+      snap
+    );
+    const nextZ = roundOffsetValue(
+      drag.startRotation.z + THREE.MathUtils.radToDeg(deltaEuler.z),
+      snap
+    );
+
+    edit.rootRotation.x = nextX;
+    edit.rootRotation.y = nextY;
+    edit.rootRotation.z = nextZ;
+    updateRootOffsetFields(edit);
+
+    const appliedDelta = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(
+        THREE.MathUtils.degToRad(nextX - drag.startRotation.x),
+        THREE.MathUtils.degToRad(nextY - drag.startRotation.y),
+        THREE.MathUtils.degToRad(nextZ - drag.startRotation.z),
+        'XYZ'
+      )
+    );
+
+    drag.target.quaternion
+      .copy(drag.startTargetQuaternion)
+      .multiply(appliedDelta)
+      .normalize();
+
+    drag.target.updateMatrixWorld(true);
+    return;
+  }
 
   const currentWorld = new THREE.Vector3();
   rootGizmoProxy.getWorldPosition(currentWorld);
 
   let deltaLocal;
+
   if (drag.parent) {
     drag.parent.updateWorldMatrix(true, false);
     const startLocal = drag.parent.worldToLocal(drag.startWorld.clone());
@@ -2432,8 +2718,7 @@ rootTransformControls.addEventListener('objectChange', () => {
     deltaLocal = currentWorld.sub(drag.startWorld);
   }
 
-  const step = Number(els.rootGizmoSnap.value) || 0.5;
-  const edit = ensureActionEdit(record);
+  const step = Number(state.rootMoveSnap) || 0.5;
 
   const nextX = roundOffsetValue(drag.startOffset.x + deltaLocal.x, step);
   const nextY = roundOffsetValue(drag.startOffset.y + deltaLocal.y, step);
@@ -2444,13 +2729,12 @@ rootTransformControls.addEventListener('objectChange', () => {
   edit.rootOffset.z = nextZ;
   updateRootOffsetFields(edit);
 
-  // Move the currently displayed target immediately, without rebuilding the
-  // full AnimationClip on every mouse pixel. This keeps dragging smooth.
   const snappedDelta = new THREE.Vector3(
     nextX - drag.startOffset.x,
     nextY - drag.startOffset.y,
     nextZ - drag.startOffset.z
   );
+
   drag.target.position.copy(drag.startTargetLocal).add(snappedDelta);
   drag.target.updateMatrixWorld(true);
 });
@@ -2477,10 +2761,21 @@ rootTransformControls.addEventListener('mouseUp', () => {
 
   renderMotionPanel();
   requestAnimationFrame(updateRootGizmoAttachment);
-  setStatus('Offset guardado en la Action: X ' +
-    ensureActionEdit(record).rootOffset.x + ' · Y ' +
-    ensureActionEdit(record).rootOffset.y + ' · Z ' +
-    ensureActionEdit(record).rootOffset.z + '.', 'ok');
+  const savedEdit = ensureActionEdit(record);
+
+  if (drag.mode === 'rotate') {
+    setStatus(
+      'Rotación guardada: X ' + savedEdit.rootRotation.x + '° · Y ' +
+      savedEdit.rootRotation.y + '° · Z ' + savedEdit.rootRotation.z + '°.',
+      'ok'
+    );
+  } else {
+    setStatus(
+      'Offset guardado: X ' + savedEdit.rootOffset.x + ' · Y ' +
+      savedEdit.rootOffset.y + ' · Z ' + savedEdit.rootOffset.z + '.',
+      'ok'
+    );
+  }
 });
 
 renderer.domElement.addEventListener('pointerdown', (event) => {
