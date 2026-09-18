@@ -70,6 +70,7 @@ const els = {
   limbDetectedLabel: $('#limbDetectedLabel'),
   limbSlotSelect: $('#limbSlotSelect'),
   limbBoneSelect: $('#limbBoneSelect'),
+  toggleLimbGizmoBtn: $('#toggleLimbGizmoBtn'),
   limbAllowStretch: $('#limbAllowStretch'),
   limbOffsetX: $('#limbOffsetX'),
   limbOffsetY: $('#limbOffsetY'),
@@ -118,6 +119,9 @@ const state = {
   rootGizmoDragging: false,
   rootGizmoDrag: null,
   activeLimbKey: 'leftHand',
+  limbGizmoEnabled: false,
+  limbGizmoDragging: false,
+  limbGizmoDrag: null,
   isScrubbing: false,
   exporting: false,
 };
@@ -194,6 +198,26 @@ rootRotateControls.size = 0.92;
 rootRotateControls.enabled = false;
 scene.add(rootRotateControls.getHelper());
 rootRotateControls.getHelper().visible = false;
+
+const limbGizmoProxy = new THREE.Object3D();
+limbGizmoProxy.name = '__limb_ik_gizmo__';
+scene.add(limbGizmoProxy);
+
+const limbTransformControls = new TransformControls(camera, renderer.domElement);
+limbTransformControls.mode = 'translate';
+limbTransformControls.space = 'world';
+limbTransformControls.size = 0.58;
+limbTransformControls.enabled = false;
+scene.add(limbTransformControls.getHelper());
+limbTransformControls.getHelper().visible = false;
+
+const limbRotateControls = new TransformControls(camera, renderer.domElement);
+limbRotateControls.mode = 'rotate';
+limbRotateControls.space = 'world';
+limbRotateControls.size = 0.76;
+limbRotateControls.enabled = false;
+scene.add(limbRotateControls.getHelper());
+limbRotateControls.getHelper().visible = false;
 
 const hemi = new THREE.HemisphereLight(0xffffff, 0x20252b, 2.0);
 scene.add(hemi);
@@ -606,105 +630,390 @@ function findTrackByNodeAndProperty(clip, nodeName, propertyName) {
   }) || null;
 }
 
-function applySingleLimbOffset(clip, edit, baseAsset, key) {
+function replaceTrackByNodeAndProperty(clip, track) {
+  let parsedNew;
+  try {
+    parsedNew = THREE.PropertyBinding.parseTrackName(track.name);
+  } catch {
+    clip.tracks.push(track);
+    return;
+  }
+
+  clip.tracks = clip.tracks.filter((candidate) => {
+    try {
+      const parsed = THREE.PropertyBinding.parseTrackName(candidate.name);
+      return !(
+        parsed.nodeName === parsedNew.nodeName &&
+        parsed.propertyName === parsedNew.propertyName
+      );
+    } catch {
+      return true;
+    }
+  });
+
+  clip.tracks.push(track);
+}
+
+function findBoneByName(root, name) {
+  let result = null;
+  root?.traverse((node) => {
+    if (!result && node.isBone && node.name === name) result = node;
+  });
+  return result;
+}
+
+function parentBone(node) {
+  let current = node?.parent || null;
+  while (current && !current.isBone) current = current.parent;
+  return current?.isBone ? current : null;
+}
+
+function getTwoBoneChain(root, endBoneName) {
+  const end = findBoneByName(root, endBoneName);
+  const mid = parentBone(end);
+  const upper = parentBone(mid);
+  if (!upper || !mid || !end) return null;
+  return { upper, mid, end };
+}
+
+function setObjectWorldQuaternion(object, worldQuaternion) {
+  const parentWorld = new THREE.Quaternion();
+  if (object.parent) object.parent.getWorldQuaternion(parentWorld);
+
+  object.quaternion.copy(
+    parentWorld.invert().multiply(worldQuaternion).normalize()
+  );
+}
+
+function captureChainPose(chain) {
+  const capture = (bone) => ({
+    position: bone.position.clone(),
+    quaternion: bone.quaternion.clone(),
+    scale: bone.scale.clone(),
+  });
+
+  return {
+    upper: capture(chain.upper),
+    mid: capture(chain.mid),
+    end: capture(chain.end),
+  };
+}
+
+function restoreChainPose(chain, pose) {
+  const restore = (bone, saved) => {
+    bone.position.copy(saved.position);
+    bone.quaternion.copy(saved.quaternion);
+    bone.scale.copy(saved.scale);
+  };
+
+  restore(chain.upper, pose.upper);
+  restore(chain.mid, pose.mid);
+  restore(chain.end, pose.end);
+
+  let root = chain.upper;
+  while (root.parent) root = root.parent;
+  root.updateMatrixWorld(true);
+}
+
+function solveTwoBoneIKPose(chain, targetPosition, targetWorldQuaternion, allowStretch) {
+  if (!chain) return false;
+
+  let root = chain.upper;
+  while (root.parent) root = root.parent;
+
+  root.updateMatrixWorld(true);
+
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  chain.upper.getWorldPosition(a);
+  chain.mid.getWorldPosition(b);
+  chain.end.getWorldPosition(c);
+
+  const upperWorldOriginal = new THREE.Quaternion();
+  const endWorldOriginal = new THREE.Quaternion();
+  chain.upper.getWorldQuaternion(upperWorldOriginal);
+  chain.end.getWorldQuaternion(endWorldOriginal);
+
+  let l1 = a.distanceTo(b);
+  let l2 = b.distanceTo(c);
+  if (l1 < 1e-8 || l2 < 1e-8) return false;
+
+  const toTarget = targetPosition.clone().sub(a);
+  let targetDistance = toTarget.length();
+  if (targetDistance < 1e-8) return false;
+  const direction = toTarget.clone().normalize();
+
+  // Optional stretch only when the target lies beyond the natural reach.
+  if (allowStretch && targetDistance > l1 + l2) {
+    const factor = targetDistance / Math.max(l1 + l2, 1e-8);
+    chain.mid.position.multiplyScalar(factor);
+    chain.end.position.multiplyScalar(factor);
+    root.updateMatrixWorld(true);
+
+    chain.mid.getWorldPosition(b);
+    chain.end.getWorldPosition(c);
+    l1 = a.distanceTo(b);
+    l2 = b.distanceTo(c);
+  }
+
+  const minReach = Math.max(Math.abs(l1 - l2) + 1e-6, 1e-6);
+  const maxReach = Math.max(l1 + l2 - 1e-6, minReach);
+  const solvedDistance = THREE.MathUtils.clamp(targetDistance, minReach, maxReach);
+  const solvedEnd = a.clone().addScaledVector(direction, solvedDistance);
+
+  const ab = b.clone().sub(a);
+  const bc = c.clone().sub(b);
+  let planeNormal = ab.clone().cross(bc);
+
+  if (planeNormal.lengthSq() < 1e-10) {
+    const helper = Math.abs(direction.y) < 0.9
+      ? new THREE.Vector3(0, 1, 0)
+      : new THREE.Vector3(1, 0, 0);
+    planeNormal = direction.clone().cross(helper);
+  }
+
+  planeNormal.normalize();
+  let bendDirection = planeNormal.clone().cross(direction).normalize();
+
+  // Preserve the animation's current bend side (elbow/knee pole).
+  const originalProjection = b.clone()
+    .sub(a)
+    .sub(direction.clone().multiplyScalar(b.clone().sub(a).dot(direction)));
+
+  if (originalProjection.dot(bendDirection) < 0) {
+    bendDirection.negate();
+  }
+
+  const x = (l1 * l1 - l2 * l2 + solvedDistance * solvedDistance) /
+    (2 * solvedDistance);
+  const h = Math.sqrt(Math.max(l1 * l1 - x * x, 0));
+
+  const solvedJoint = a.clone()
+    .addScaledVector(direction, x)
+    .addScaledVector(bendDirection, h);
+
+  // Upper bone: rotate current A->B toward A->solvedJoint.
+  const currentUpperDirection = b.clone().sub(a).normalize();
+  const desiredUpperDirection = solvedJoint.clone().sub(a).normalize();
+  const upperDelta = new THREE.Quaternion().setFromUnitVectors(
+    currentUpperDirection,
+    desiredUpperDirection
+  );
+  const desiredUpperWorld = upperDelta
+    .multiply(upperWorldOriginal)
+    .normalize();
+
+  setObjectWorldQuaternion(chain.upper, desiredUpperWorld);
+  root.updateMatrixWorld(true);
+
+  const bSolved = new THREE.Vector3();
+  const cAfterUpper = new THREE.Vector3();
+  chain.mid.getWorldPosition(bSolved);
+  chain.end.getWorldPosition(cAfterUpper);
+
+  // Lower bone: rotate B->C toward B->solvedEnd.
+  const midWorldCurrent = new THREE.Quaternion();
+  chain.mid.getWorldQuaternion(midWorldCurrent);
+
+  const currentMidDirection = cAfterUpper.clone().sub(bSolved).normalize();
+  const desiredMidDirection = solvedEnd.clone().sub(bSolved).normalize();
+  const midDelta = new THREE.Quaternion().setFromUnitVectors(
+    currentMidDirection,
+    desiredMidDirection
+  );
+  const desiredMidWorld = midDelta
+    .multiply(midWorldCurrent)
+    .normalize();
+
+  setObjectWorldQuaternion(chain.mid, desiredMidWorld);
+  root.updateMatrixWorld(true);
+
+  // End effector orientation is independent from the positional IK chain.
+  const desiredEndWorld = targetWorldQuaternion
+    ? targetWorldQuaternion.clone().normalize()
+    : endWorldOriginal;
+
+  setObjectWorldQuaternion(chain.end, desiredEndWorld);
+  root.updateMatrixWorld(true);
+
+  return true;
+}
+
+function collectIKSampleTimes(clip) {
+  const map = new Map();
+  const add = (value) => {
+    if (!Number.isFinite(value)) return;
+    const t = THREE.MathUtils.clamp(value, 0, Math.max(clip.duration || 0, 0));
+    map.set(t.toFixed(6), t);
+  };
+
+  add(0);
+  add(clip.duration || 0);
+
+  for (const track of clip.tracks) {
+    for (const t of track.times) add(Number(t));
+  }
+
+  let times = [...map.values()].sort((a, b) => a - b);
+
+  // Protect the browser from pathological clips with thousands of distinct
+  // key times. 30 fps is enough for the existing export pipeline.
+  if (times.length > 1200) {
+    const duration = Math.max(clip.duration || 0, 1 / 30);
+    const count = Math.max(2, Math.ceil(duration * 30) + 1);
+    times = Array.from({ length: count }, (_, i) =>
+      Math.min(i / 30, duration)
+    );
+    if (times[times.length - 1] !== duration) times.push(duration);
+  }
+
+  return times;
+}
+
+function applySingleLimbIKOffset(clip, edit, baseAsset, key) {
   const limb = ensureLimbOffsets(edit)[key];
   const boneName = resolveLimbBoneName(edit, baseAsset, key);
-  if (!limb || !boneName) return;
-
-  const rest = baseAsset?.restPose?.get(boneName);
-  if (!rest) return;
+  if (!limb || !boneName) return false;
 
   const px = Number(limb.position?.x) || 0;
   const py = Number(limb.position?.y) || 0;
   const pz = Number(limb.position?.z) || 0;
-  const rotationOffsetWorld = getLimbQuaternion(limb);
+  const rotationOffset = getLimbQuaternion(limb);
 
   const hasPosition = Math.abs(px) + Math.abs(py) + Math.abs(pz) > 1e-9;
-  const hasRotation = rotationOffsetWorld.angleTo(new THREE.Quaternion()) > 1e-8;
-  if (!hasPosition && !hasRotation) return;
+  const hasRotation = rotationOffset.angleTo(new THREE.Quaternion()) > 1e-8;
+  if (!hasPosition && !hasRotation) return false;
 
-  const parentWorld = (rest.parentWorldQuaternion || new THREE.Quaternion()).clone().normalize();
-  const parentWorldInv = parentWorld.clone().invert();
+  const sampleRoot = SkeletonUtils.clone(baseAsset.object);
+  applyRestPose(sampleRoot, baseAsset.restPose);
 
-  if (hasPosition) {
-    const worldDelta = new THREE.Vector3(px, py, pz);
-    const localDelta = worldDelta.clone().applyQuaternion(parentWorldInv);
-
-    let track = findTrackByNodeAndProperty(clip, boneName, 'position');
-    if (!track) {
-      const duration = Math.max(clip.duration || 0, 1 / 30);
-      track = new THREE.VectorKeyframeTrack(
-        boneName + '.position',
-        [0, duration],
-        [
-          rest.position.x, rest.position.y, rest.position.z,
-          rest.position.x, rest.position.y, rest.position.z,
-        ]
-      );
-      clip.tracks.push(track);
-    }
-
-    const v = new THREE.Vector3();
-    for (let i = 0; i < track.values.length; i += 3) {
-      v.set(track.values[i], track.values[i + 1], track.values[i + 2]);
-      const originalLength = v.length();
-      v.add(localDelta);
-
-      if (!limb.allowStretch && originalLength > 1e-8 && v.lengthSq() > 1e-12) {
-        v.setLength(originalLength);
-      }
-
-      track.values[i] = v.x;
-      track.values[i + 1] = v.y;
-      track.values[i + 2] = v.z;
-    }
+  const chain = getTwoBoneChain(sampleRoot, boneName);
+  if (!chain) {
+    console.warn('No se pudo construir cadena IK de 2 huesos para', boneName);
+    return false;
   }
 
-  if (hasRotation) {
-    const localOffset = parentWorldInv
+  const sourceClip = clip.clone();
+  const sampleTimes = collectIKSampleTimes(sourceClip);
+  const mixer = new THREE.AnimationMixer(sampleRoot);
+  const action = mixer.clipAction(sourceClip, sampleRoot);
+  action.enabled = true;
+  action.setLoop(THREE.LoopOnce, 0);
+  action.clampWhenFinished = true;
+  action.play();
+
+  const upperQ = [];
+  const midQ = [];
+  const endQ = [];
+  const midP = [];
+  const endP = [];
+
+  const worldOffset = new THREE.Vector3(px, py, pz);
+  const originalEndWorld = new THREE.Quaternion();
+  const endPosition = new THREE.Vector3();
+
+  for (const time of sampleTimes) {
+    applyRestPose(sampleRoot, baseAsset.restPose);
+    mixer.setTime(time);
+    sampleRoot.updateMatrixWorld(true);
+
+    chain.end.getWorldPosition(endPosition);
+    chain.end.getWorldQuaternion(originalEndWorld);
+
+    const targetPosition = endPosition.clone().add(worldOffset);
+    const targetQuaternion = rotationOffset
       .clone()
-      .multiply(rotationOffsetWorld)
-      .multiply(parentWorld)
+      .multiply(originalEndWorld)
       .normalize();
 
-    let track = findTrackByNodeAndProperty(clip, boneName, 'quaternion');
-    if (!track) {
-      const duration = Math.max(clip.duration || 0, 1 / 30);
-      const qRest = rest.quaternion.clone().normalize();
-      track = new THREE.QuaternionKeyframeTrack(
-        boneName + '.quaternion',
-        [0, duration],
-        [
-          qRest.x, qRest.y, qRest.z, qRest.w,
-          qRest.x, qRest.y, qRest.z, qRest.w,
-        ]
-      );
-      clip.tracks.push(track);
-    }
+    solveTwoBoneIKPose(
+      chain,
+      targetPosition,
+      targetQuaternion,
+      Boolean(limb.allowStretch)
+    );
 
-    const q = new THREE.Quaternion();
-    for (let i = 0; i < track.values.length; i += 4) {
-      q.set(
-        track.values[i],
-        track.values[i + 1],
-        track.values[i + 2],
-        track.values[i + 3]
-      ).normalize();
+    upperQ.push(
+      chain.upper.quaternion.x,
+      chain.upper.quaternion.y,
+      chain.upper.quaternion.z,
+      chain.upper.quaternion.w
+    );
+    midQ.push(
+      chain.mid.quaternion.x,
+      chain.mid.quaternion.y,
+      chain.mid.quaternion.z,
+      chain.mid.quaternion.w
+    );
+    endQ.push(
+      chain.end.quaternion.x,
+      chain.end.quaternion.y,
+      chain.end.quaternion.z,
+      chain.end.quaternion.w
+    );
 
-      q.premultiply(localOffset).normalize();
-
-      track.values[i] = q.x;
-      track.values[i + 1] = q.y;
-      track.values[i + 2] = q.z;
-      track.values[i + 3] = q.w;
+    if (limb.allowStretch) {
+      midP.push(chain.mid.position.x, chain.mid.position.y, chain.mid.position.z);
+      endP.push(chain.end.position.x, chain.end.position.y, chain.end.position.z);
     }
   }
+
+  mixer.stopAllAction();
+  mixer.uncacheRoot(sampleRoot);
+
+  replaceTrackByNodeAndProperty(
+    clip,
+    new THREE.QuaternionKeyframeTrack(
+      chain.upper.name + '.quaternion',
+      sampleTimes,
+      upperQ
+    )
+  );
+  replaceTrackByNodeAndProperty(
+    clip,
+    new THREE.QuaternionKeyframeTrack(
+      chain.mid.name + '.quaternion',
+      sampleTimes,
+      midQ
+    )
+  );
+  replaceTrackByNodeAndProperty(
+    clip,
+    new THREE.QuaternionKeyframeTrack(
+      chain.end.name + '.quaternion',
+      sampleTimes,
+      endQ
+    )
+  );
+
+  if (limb.allowStretch) {
+    replaceTrackByNodeAndProperty(
+      clip,
+      new THREE.VectorKeyframeTrack(
+        chain.mid.name + '.position',
+        sampleTimes,
+        midP
+      )
+    );
+    replaceTrackByNodeAndProperty(
+      clip,
+      new THREE.VectorKeyframeTrack(
+        chain.end.name + '.position',
+        sampleTimes,
+        endP
+      )
+    );
+  }
+
+  clip.resetDuration();
+  return true;
 }
 
 function applyLimbOffsets(clip, record, baseAsset) {
   const edit = ensureActionEdit(record);
   for (const key of LIMB_KEYS) {
-    applySingleLimbOffset(clip, edit, baseAsset, key);
+    applySingleLimbIKOffset(clip, edit, baseAsset, key);
   }
 }
 
@@ -1424,6 +1733,129 @@ function renderLimbEditor(edit, base) {
   els.limbRotationX.value = String(cleanLiveNumber(e.x, 2));
   els.limbRotationY.value = String(cleanLiveNumber(e.y, 2));
   els.limbRotationZ.value = String(cleanLiveNumber(e.z, 2));
+
+  els.toggleLimbGizmoBtn.classList.toggle('active', state.limbGizmoEnabled);
+  els.toggleLimbGizmoBtn.textContent = state.limbGizmoEnabled
+    ? 'Gizmo IK activo'
+    : 'Editar extremidad en viewport';
+
+  requestAnimationFrame(updateLimbGizmoAttachment);
+}
+
+function getActiveLimbData() {
+  const record = getActiveRecord();
+  const base = getBaseAsset();
+  if (!record || !base) return null;
+
+  const edit = ensureActionEdit(record);
+  const key = state.activeLimbKey || 'leftHand';
+  const limb = ensureLimbOffsets(edit)[key];
+  const boneName = resolveLimbBoneName(edit, base, key);
+  const bone = boneName ? findBoneByName(base.object, boneName) : null;
+
+  return { record, base, edit, key, limb, boneName, bone };
+}
+
+function hideLimbGizmo() {
+  limbTransformControls.detach();
+  limbRotateControls.detach();
+  limbTransformControls.enabled = false;
+  limbRotateControls.enabled = false;
+  limbTransformControls.getHelper().visible = false;
+  limbRotateControls.getHelper().visible = false;
+  els.toggleLimbGizmoBtn?.classList.remove('active');
+}
+
+function updateLimbGizmoAttachment() {
+  const data = getActiveLimbData();
+  const valid = Boolean(
+    state.limbGizmoEnabled &&
+    data?.bone &&
+    !isEmptyClip(data.record)
+  );
+
+  els.toggleLimbGizmoBtn?.classList.toggle('active', valid);
+
+  if (!valid) {
+    hideLimbGizmo();
+    return;
+  }
+
+  data.bone.updateWorldMatrix(true, false);
+  data.bone.getWorldPosition(limbGizmoProxy.position);
+  data.bone.getWorldQuaternion(limbGizmoProxy.quaternion);
+  limbGizmoProxy.scale.set(1, 1, 1);
+  limbGizmoProxy.updateMatrixWorld(true);
+
+  limbTransformControls.setMode('translate');
+  limbTransformControls.setSpace('world');
+  limbTransformControls.setTranslationSnap(null);
+
+  limbRotateControls.setMode('rotate');
+  limbRotateControls.setSpace('world');
+  limbRotateControls.setRotationSnap(null);
+
+  if (limbTransformControls.object !== limbGizmoProxy) {
+    limbTransformControls.attach(limbGizmoProxy);
+  }
+  if (limbRotateControls.object !== limbGizmoProxy) {
+    limbRotateControls.attach(limbGizmoProxy);
+  }
+
+  limbTransformControls.enabled = true;
+  limbRotateControls.enabled = true;
+  limbTransformControls.getHelper().visible = true;
+  limbRotateControls.getHelper().visible = true;
+}
+
+function updateLimbGizmoPosition() {
+  if (!state.limbGizmoEnabled || state.limbGizmoDragging) return;
+
+  const data = getActiveLimbData();
+  if (!data?.bone) {
+    hideLimbGizmo();
+    return;
+  }
+
+  data.bone.updateWorldMatrix(true, false);
+  data.bone.getWorldPosition(limbGizmoProxy.position);
+  data.bone.getWorldQuaternion(limbGizmoProxy.quaternion);
+  limbGizmoProxy.updateMatrixWorld(true);
+}
+
+function sceneDeltaToRigGlobal(deltaWorld) {
+  const q = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  state.actionTransformNode.getWorldQuaternion(q);
+  state.actionTransformNode.getWorldScale(scale);
+
+  const v = deltaWorld.clone().applyQuaternion(q.clone().invert());
+  v.x /= Math.abs(scale.x) > 1e-8 ? scale.x : 1;
+  v.y /= Math.abs(scale.y) > 1e-8 ? scale.y : 1;
+  v.z /= Math.abs(scale.z) > 1e-8 ? scale.z : 1;
+  return v;
+}
+
+function sceneQuaternionDeltaToRigGlobal(deltaWorld) {
+  const q = new THREE.Quaternion();
+  state.actionTransformNode.getWorldQuaternion(q);
+
+  return q.clone()
+    .invert()
+    .multiply(deltaWorld)
+    .multiply(q)
+    .normalize();
+}
+
+function updateLimbFieldsOnly(limb) {
+  els.limbOffsetX.value = String(cleanLiveNumber(limb.position.x, 3));
+  els.limbOffsetY.value = String(cleanLiveNumber(limb.position.y, 3));
+  els.limbOffsetZ.value = String(cleanLiveNumber(limb.position.z, 3));
+
+  const e = limbQuaternionToEuler(limb);
+  els.limbRotationX.value = String(cleanLiveNumber(e.x, 2));
+  els.limbRotationY.value = String(cleanLiveNumber(e.y, 2));
+  els.limbRotationZ.value = String(cleanLiveNumber(e.z, 2));
 }
 
 function updateTrimVisuals(edit, record) {
@@ -1451,6 +1883,7 @@ function renderMotionPanel() {
   if (!enabled) {
     els.motionPanelActionName.textContent = record ? record.name : 'Selecciona una Action';
     requestAnimationFrame(updateRootGizmoAttachment);
+    requestAnimationFrame(updateLimbGizmoAttachment);
     return;
   }
 
@@ -2100,6 +2533,8 @@ function setActiveCamera(mode, { preserveView = true } = {}) {
 
   rootTransformControls.camera = camera;
   rootRotateControls.camera = camera;
+  limbTransformControls.camera = camera;
+  limbRotateControls.camera = camera;
 
   flushOrbitControls();
 
@@ -2723,6 +3158,9 @@ function clearAll() {
   state.rootGizmoEnabled = false;
   state.rootGizmoDragging = false;
   state.rootGizmoDrag = null;
+  state.limbGizmoEnabled = false;
+  state.limbGizmoDragging = false;
+  state.limbGizmoDrag = null;
   state.axisViewActive = false;
   state.axisViewQuaternion = null;
   state.axisAutoSwitchPending = false;
@@ -2730,6 +3168,7 @@ function clearAll() {
   state.axisViewReturnMode = 'perspective';
   state.blenderNavDrag = null;
   hideRootGizmo();
+  hideLimbGizmo();
 
   resetPlaybackUi();
   renderMotionPanel();
@@ -2878,7 +3317,10 @@ els.limbSlotSelect.addEventListener('change', () => {
   state.activeLimbKey = els.limbSlotSelect.value;
   const record = getActiveRecord();
   const base = getBaseAsset();
-  if (record && base) renderLimbEditor(ensureActionEdit(record), base);
+  if (record && base) {
+    renderLimbEditor(ensureActionEdit(record), base);
+    requestAnimationFrame(updateLimbGizmoAttachment);
+  }
 });
 
 els.limbBoneSelect.addEventListener('change', () => {
@@ -2889,6 +3331,7 @@ els.limbBoneSelect.addEventListener('change', () => {
   ensureLimbOffsets(edit)[state.activeLimbKey].bone = els.limbBoneSelect.value;
   renderLimbEditor(edit, base);
   refreshActivePreview();
+  requestAnimationFrame(updateLimbGizmoAttachment);
 });
 
 els.limbAllowStretch.addEventListener('change', () => {
@@ -2943,6 +3386,214 @@ els.resetLimbOffsetBtn.addEventListener('click', () => {
   refreshActivePreview();
   setStatus(limbDisplayName(state.activeLimbKey) + ' restablecida.', 'ok');
 });
+
+els.toggleLimbGizmoBtn.addEventListener('click', () => {
+  const data = getActiveLimbData();
+  if (!data?.bone) {
+    setStatus('No se detectó un hueso válido para esta extremidad. Selecciónalo manualmente.', 'warn');
+    return;
+  }
+
+  state.limbGizmoEnabled = !state.limbGizmoEnabled;
+  renderLimbEditor(data.edit, data.base);
+  updateLimbGizmoAttachment();
+
+  setStatus(
+    state.limbGizmoEnabled
+      ? 'Gizmo IK activo en ' + data.boneName + '. Flechas = objetivo IK; aros = rotación del efector.'
+      : 'Gizmo IK de extremidad desactivado.',
+    'info'
+  );
+});
+
+function beginLimbGizmoDrag(mode) {
+  if (state.limbGizmoDragging || state.rootGizmoDragging) return;
+
+  const data = getActiveLimbData();
+  if (!data?.bone) return;
+
+  const chain = getTwoBoneChain(data.base.object, data.boneName);
+  if (!chain) {
+    setStatus('El hueso seleccionado no tiene una cadena padre de 2 huesos compatible con IK.', 'warn');
+    return;
+  }
+
+  controls.enabled = false;
+  state.limbGizmoDragging = true;
+
+  const startProxyWorld = new THREE.Vector3();
+  const startProxyQuaternion = new THREE.Quaternion();
+  limbGizmoProxy.getWorldPosition(startProxyWorld);
+  limbGizmoProxy.getWorldQuaternion(startProxyQuaternion);
+
+  const actionWorldQuaternion = new THREE.Quaternion();
+  state.actionTransformNode.getWorldQuaternion(actionWorldQuaternion);
+
+  state.limbGizmoDrag = {
+    mode,
+    recordId: data.record.id,
+    key: data.key,
+    chain,
+    chainPose: captureChainPose(chain),
+    startProxyWorld,
+    startProxyQuaternion,
+    startPosition: new THREE.Vector3(
+      Number(data.limb.position.x) || 0,
+      Number(data.limb.position.y) || 0,
+      Number(data.limb.position.z) || 0
+    ),
+    startQuaternion: getLimbQuaternion(data.limb),
+    startTime: state.currentAction?.time || 0,
+    wasPaused: Boolean(state.currentAction?.paused),
+  };
+
+  if (state.currentAction) state.currentAction.paused = true;
+}
+
+function updateLimbTranslateDrag() {
+  const drag = state.limbGizmoDrag;
+  const data = getActiveLimbData();
+  if (
+    !state.limbGizmoDragging ||
+    !drag ||
+    drag.mode !== 'translate' ||
+    !data ||
+    data.record.id !== drag.recordId
+  ) return;
+
+  restoreChainPose(drag.chain, drag.chainPose);
+
+  const currentWorld = new THREE.Vector3();
+  limbGizmoProxy.getWorldPosition(currentWorld);
+
+  const sceneDelta = currentWorld.clone().sub(drag.startProxyWorld);
+  const rigDelta = sceneDeltaToRigGlobal(sceneDelta);
+
+  data.limb.position.x = drag.startPosition.x + rigDelta.x;
+  data.limb.position.y = drag.startPosition.y + rigDelta.y;
+  data.limb.position.z = drag.startPosition.z + rigDelta.z;
+  updateLimbFieldsOnly(data.limb);
+
+  const startEndWorldQ = drag.startProxyQuaternion.clone();
+  solveTwoBoneIKPose(
+    drag.chain,
+    currentWorld,
+    startEndWorldQ,
+    Boolean(data.limb.allowStretch)
+  );
+}
+
+function updateLimbRotateDrag() {
+  const drag = state.limbGizmoDrag;
+  const data = getActiveLimbData();
+  if (
+    !state.limbGizmoDragging ||
+    !drag ||
+    drag.mode !== 'rotate' ||
+    !data ||
+    data.record.id !== drag.recordId
+  ) return;
+
+  restoreChainPose(drag.chain, drag.chainPose);
+
+  const currentWorldQ = new THREE.Quaternion();
+  limbGizmoProxy.getWorldQuaternion(currentWorldQ);
+
+  const deltaScene = currentWorldQ
+    .clone()
+    .multiply(drag.startProxyQuaternion.clone().invert())
+    .normalize();
+
+  const deltaRig = sceneQuaternionDeltaToRigGlobal(deltaScene);
+  storeLimbQuaternion(
+    data.limb,
+    deltaRig.clone().multiply(drag.startQuaternion).normalize()
+  );
+  updateLimbFieldsOnly(data.limb);
+
+  const targetPosition = drag.startProxyWorld.clone();
+  solveTwoBoneIKPose(
+    drag.chain,
+    targetPosition,
+    currentWorldQ,
+    Boolean(data.limb.allowStretch)
+  );
+}
+
+function finishLimbGizmoDrag(mode) {
+  const drag = state.limbGizmoDrag;
+  if (!drag || drag.mode !== mode) return;
+
+  const record = state.clips.find((item) => item.id === drag.recordId);
+  const data = getActiveLimbData();
+
+  controls.enabled = true;
+  state.limbGizmoDragging = false;
+  state.limbGizmoDrag = null;
+
+  if (record && data) {
+    const moveSnap = Math.max(Number(state.rootMoveSnap) || 0.5, 0.000001);
+    if (mode === 'translate') {
+      data.limb.position.x = roundOffsetValue(data.limb.position.x, moveSnap);
+      data.limb.position.y = roundOffsetValue(data.limb.position.y, moveSnap);
+      data.limb.position.z = roundOffsetValue(data.limb.position.z, moveSnap);
+    } else {
+      const snapRad = THREE.MathUtils.degToRad(
+        Math.max(Number(state.rootRotateSnap) || 5, 0.0001)
+      );
+      const current = getLimbQuaternion(data.limb);
+      const delta = current
+        .clone()
+        .multiply(drag.startQuaternion.clone().invert())
+        .normalize();
+
+      let angle = 2 * Math.acos(THREE.MathUtils.clamp(delta.w, -1, 1));
+      if (angle > Math.PI) angle -= Math.PI * 2;
+
+      const sinHalf = Math.sqrt(Math.max(1 - delta.w * delta.w, 0));
+      const axis = sinHalf < 1e-7
+        ? new THREE.Vector3(1, 0, 0)
+        : new THREE.Vector3(
+            delta.x / sinHalf,
+            delta.y / sinHalf,
+            delta.z / sinHalf
+          ).normalize();
+
+      const snappedAngle = Math.round(angle / snapRad) * snapRad;
+      const snappedDelta = new THREE.Quaternion().setFromAxisAngle(axis, snappedAngle);
+      storeLimbQuaternion(
+        data.limb,
+        snappedDelta.multiply(drag.startQuaternion).normalize()
+      );
+    }
+  }
+
+  if (record && state.mixer) {
+    playClip(record.id, {
+      preserveTime: drag.startTime,
+      preservePaused: drag.wasPaused,
+      silent: true,
+    });
+  }
+
+  renderMotionPanel();
+  requestAnimationFrame(updateLimbGizmoAttachment);
+
+  setStatus(
+    mode === 'translate'
+      ? 'Objetivo IK de ' + limbDisplayName(drag.key) + ' guardado.'
+      : 'Rotación global de ' + limbDisplayName(drag.key) + ' guardada como quaternion.',
+    'ok'
+  );
+}
+
+limbTransformControls.addEventListener('mouseDown', () => beginLimbGizmoDrag('translate'));
+limbTransformControls.addEventListener('objectChange', updateLimbTranslateDrag);
+limbTransformControls.addEventListener('mouseUp', () => finishLimbGizmoDrag('translate'));
+
+limbRotateControls.addEventListener('mouseDown', () => beginLimbGizmoDrag('rotate'));
+limbRotateControls.addEventListener('objectChange', updateLimbRotateDrag);
+limbRotateControls.addEventListener('mouseUp', () => finishLimbGizmoDrag('rotate'));
 
 function syncRootOffset() {
   const record = getActiveRecord();
@@ -3285,7 +3936,12 @@ rootRotateControls.addEventListener('mouseUp', () => {
 });
 
 renderer.domElement.addEventListener('pointerdown', (event) => {
-  if (event.pointerType === 'touch' || event.button !== 1 || state.rootGizmoDragging) return;
+  if (
+    event.pointerType === 'touch' ||
+    event.button !== 1 ||
+    state.rootGizmoDragging ||
+    state.limbGizmoDragging
+  ) return;
 
   // Prevent browser middle-click auto-scroll and configure OrbitControls
   // before its bubble-phase pointerdown handler reads mouseButtons.MIDDLE.
@@ -3507,6 +4163,7 @@ function animate() {
 
   if (state.mixer) state.mixer.update(delta);
   updateRootGizmoPosition();
+  updateLimbGizmoPosition();
   controls.update();
   updateNavigationGizmo();
 
