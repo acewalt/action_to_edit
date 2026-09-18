@@ -379,6 +379,50 @@ button { color: inherit; }
   padding: 7px 8px;
   font-size: 9.5px;
 }
+.gizmo-tool-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: stretch;
+  margin: 0 0 6px;
+}
+.gizmo-tool-button {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #1a2027;
+  color: var(--soft);
+  padding: 7px 9px;
+  font-size: 9px;
+  cursor: pointer;
+}
+.gizmo-tool-button:hover { background: #242c35; color: var(--text); }
+.gizmo-tool-button.active {
+  border-color: rgba(112, 211, 154, .55);
+  background: rgba(112, 211, 154, .10);
+  color: var(--ok);
+}
+.gizmo-snap-control {
+  min-width: 78px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 8px;
+}
+.gizmo-snap-control select {
+  min-height: 28px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #151a20;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 9px;
+}
+.gizmo-help {
+  margin-bottom: 8px !important;
+  line-height: 1.35;
+}
+
 .offset-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
