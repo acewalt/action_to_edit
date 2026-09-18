@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-29" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-30" />
   <script type="importmap">
   {
     "imports": {
@@ -424,42 +424,94 @@
         </section>
 
         <section class="retarget-map-card">
-          <div class="retarget-map-head">
-            <div>
-              <strong>Bone Map</strong>
-              <span id="retargetValidPairs">0 / 0 pairs valid</span>
+          <div class="retarget-work-tabs" role="tablist" aria-label="Retargeting workspace">
+            <button id="retargetBoneMapTab" class="retarget-work-tab active" type="button" role="tab" aria-selected="true">Bone Map</button>
+            <button id="retargetRestPoseTab" class="retarget-work-tab" type="button" role="tab" aria-selected="false">Redefine Rest Pose</button>
+          </div>
+
+          <div id="retargetBoneMapPane" class="retarget-work-pane">
+            <div class="retarget-map-head">
+              <div>
+                <strong>Bone Map</strong>
+                <span id="retargetValidPairs">0 / 0 pairs valid</span>
+              </div>
+              <label class="retarget-search">
+                <span>⌕</span>
+                <input id="retargetPairSearch" type="search" placeholder="Buscar source o target…" />
+              </label>
             </div>
-            <label class="retarget-search">
-              <span>⌕</span>
-              <input id="retargetPairSearch" type="search" placeholder="Buscar source o target…" />
-            </label>
+
+            <div class="retarget-map-tools">
+              <button id="retargetAddPairBtn" type="button">＋ Add Pair</button>
+              <button id="retargetAddAllBtn" type="button">Add All</button>
+              <button id="retargetAutoMatchBtn" type="button">Auto-Match</button>
+              <button id="retargetSortAZBtn" type="button">A-Z</button>
+              <button id="retargetSortStandardBtn" type="button">Sort</button>
+              <button id="retargetClearPairsBtn" type="button">Clear</button>
+            </div>
+
+            <div class="retarget-table-wrap">
+              <table class="retarget-table">
+                <thead>
+                  <tr>
+                    <th>Source</th>
+                    <th>Target</th>
+                    <th>Channels</th>
+                    <th>Axes</th>
+                    <th>Anchor</th>
+                    <th>Influence</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="retargetPairTableBody"></tbody>
+              </table>
+            </div>
           </div>
 
-          <div class="retarget-map-tools">
-            <button id="retargetAddPairBtn" type="button">＋ Add Pair</button>
-            <button id="retargetAddAllBtn" type="button">Add All</button>
-            <button id="retargetAutoMatchBtn" type="button">Auto-Match</button>
-            <button id="retargetSortAZBtn" type="button">A-Z</button>
-            <button id="retargetSortStandardBtn" type="button">Sort</button>
-            <button id="retargetClearPairsBtn" type="button">Clear</button>
+          <div id="retargetRestPosePane" class="retarget-work-pane retarget-rest-editor-pane is-hidden">
+            <div class="retarget-rest-editor-head">
+              <div>
+                <strong>Redefine Source Rest Pose</strong>
+                <span>Ajusta el Source hasta que coincida con la pose del Target. Esta pose se usa como nueva referencia sin modificar el FBX original.</span>
+              </div>
+              <div class="retarget-rest-view-toggles">
+                <label><input id="retargetRestShowSource" type="checkbox" checked /> Source</label>
+                <label><input id="retargetRestShowTarget" type="checkbox" checked /> Target</label>
+                <label><input id="retargetRestShowMeshes" type="checkbox" checked /> Mesh</label>
+              </div>
+            </div>
+
+            <div class="retarget-rest-toolbar">
+              <label class="retarget-field retarget-rest-bone-field">
+                <span>Source Bone</span>
+                <select id="retargetRestBoneSelect"></select>
+              </label>
+              <div class="retarget-rest-tool-group">
+                <button id="retargetRestRotateBtn" class="retarget-tool-mode active" type="button">Rotar</button>
+                <button id="retargetRestMoveBtn" class="retarget-tool-mode" type="button">Mover</button>
+              </div>
+              <label class="retarget-field retarget-rest-space-field">
+                <span>Espacio</span>
+                <select id="retargetRestSpaceSelect">
+                  <option value="local" selected>Local</option>
+                  <option value="world">Global</option>
+                </select>
+              </label>
+              <button id="retargetRestResetBoneBtn" class="retarget-small-button" type="button">Reset Bone</button>
+              <button id="retargetRestResetAllBtn" class="retarget-small-button" type="button">Reset Pose</button>
+              <button id="retargetRestFitBtn" class="retarget-small-button" type="button">Encuadrar</button>
+              <button id="retargetRestUsePoseBtn" class="retarget-small-button retarget-use-rest-button" type="button">Usar esta pose como Rest</button>
+            </div>
+
+            <div id="retargetRestViewport" class="retarget-rest-viewport">
+              <div class="retarget-rest-help">
+                <strong>Editar Rest Pose</strong>
+                <span>Selecciona un hueso en el desplegable o haz clic sobre un punto del esqueleto Source. Usa el gizmo para rotarlo/moverlo.</span>
+              </div>
+              <div id="retargetRestViewportBadge" class="retarget-rest-badge">Sin pose redefinida</div>
+            </div>
           </div>
 
-          <div class="retarget-table-wrap">
-            <table class="retarget-table">
-              <thead>
-                <tr>
-                  <th>Source</th>
-                  <th>Target</th>
-                  <th>Channels</th>
-                  <th>Axes</th>
-                  <th>Anchor</th>
-                  <th>Influence</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody id="retargetPairTableBody"></tbody>
-            </table>
-          </div>
           <datalist id="retargetSourceBonesList"></datalist>
           <datalist id="retargetTargetBonesList"></datalist>
         </section>
@@ -484,6 +536,7 @@
               <span>Source Rest Pose</span>
               <select id="retargetRestMode">
                 <option value="original">Rest original del FBX</option>
+                <option value="manual">Redefinir Rest Pose en viewport</option>
                 <option value="firstFrame">Primer frame de la Action</option>
               </select>
             </label>
@@ -590,6 +643,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-29"></script>
+  <script type="module" src="./app.js?v=20260918-30"></script>
 </body>
 </html>
