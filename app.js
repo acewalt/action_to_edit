@@ -1139,7 +1139,7 @@ async function exportFBX() {
     });
 
     const blob = new Blob([bytes], { type: 'application/octet-stream' });
-    const filename = stripExt(base.file.name) + '_all_actions.fbx';
+    const filename = preset + '_' + stripExt(base.file.name) + '_all_actions.fbx';
     downloadBlob(blob, filename);
 
     setStatus(
@@ -1180,7 +1180,8 @@ async function exportGLB() {
       maxTextureSize: 4096,
     });
 
-    const filename = stripExt(base.file.name) + '_all_actions.glb';
+    const glbTag = els.presetSelect.value;
+    const filename = glbTag + '_' + stripExt(base.file.name) + '_all_actions.glb';
     downloadBlob(new Blob([result], { type: 'model/gltf-binary' }), filename);
     setStatus('GLB exportado con el mismo retarget de rest pose: ' + filename + ' · ' + clips.length + ' actions.', 'ok');
   } catch (error) {
