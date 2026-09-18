@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
@@ -51,6 +52,8 @@ const els = {
   rootOffsetY: $('#rootOffsetY'),
   rootOffsetZ: $('#rootOffsetZ'),
   resetRootOffsetBtn: $('#resetRootOffsetBtn'),
+  toggleRootGizmoBtn: $('#toggleRootGizmoBtn'),
+  rootGizmoSnap: $('#rootGizmoSnap'),
   toggleSkeletonBtn: $('#toggleSkeletonBtn'),
   fitCameraBtn: $('#fitCameraBtn'),
   statusBar: $('#statusBar'),
@@ -76,6 +79,9 @@ const state = {
   skeletonVisible: false,
   previewStage: null,
   motionPanelOpen: true,
+  rootGizmoEnabled: false,
+  rootGizmoDragging: false,
+  rootGizmoDrag: null,
   isScrubbing: false,
   exporting: false,
 };
@@ -105,6 +111,18 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.target.set(0, 1, 0);
+
+const rootGizmoProxy = new THREE.Object3D();
+rootGizmoProxy.name = '__action_root_offset_gizmo__';
+scene.add(rootGizmoProxy);
+
+const rootTransformControls = new TransformControls(camera, renderer.domElement);
+rootTransformControls.mode = 'translate';
+rootTransformControls.space = 'world';
+rootTransformControls.size = 0.78;
+rootTransformControls.enabled = false;
+scene.add(rootTransformControls.getHelper());
+rootTransformControls.getHelper().visible = false;
 
 const hemi = new THREE.HemisphereLight(0xffffff, 0x20252b, 2.0);
 scene.add(hemi);
@@ -823,6 +841,88 @@ function normalizePreview(object) {
   return true;
 }
 
+function findRootTargetObject(record = getActiveRecord(), base = getBaseAsset()) {
+  if (!record || !base) return null;
+  const targetName = resolveRootTarget(record, base);
+  if (!targetName) return null;
+
+  if (ensureActionEdit(record).rootTarget === 'object') return base.object;
+
+  let found = null;
+  base.object.traverse((node) => {
+    if (!found && node.name === targetName) found = node;
+  });
+  return found;
+}
+
+function roundOffsetValue(value, step) {
+  const snap = Math.max(Number(step) || 0.5, 0.000001);
+  const rounded = Math.round(value / snap) * snap;
+  return Math.abs(rounded) < 1e-9 ? 0 : Number(rounded.toFixed(4));
+}
+
+function updateRootOffsetFields(edit) {
+  if (!edit) return;
+  updateRootOffsetFields(edit);
+  els.toggleRootGizmoBtn.classList.toggle('active', state.rootGizmoEnabled);
+  els.toggleRootGizmoBtn.textContent = state.rootGizmoEnabled ? 'Mover activo' : 'Mover en viewport';
+  requestAnimationFrame(updateRootGizmoAttachment);
+}
+
+function hideRootGizmo() {
+  rootTransformControls.detach();
+  rootTransformControls.enabled = false;
+  rootTransformControls.getHelper().visible = false;
+  els.toggleRootGizmoBtn?.classList.remove('active');
+}
+
+function updateRootGizmoAttachment() {
+  const record = getActiveRecord();
+  const base = getBaseAsset();
+  const target = findRootTargetObject(record, base);
+  const valid = Boolean(
+    state.rootGizmoEnabled &&
+    record &&
+    base &&
+    target &&
+    !isEmptyClip(record)
+  );
+
+  els.toggleRootGizmoBtn?.classList.toggle('active', valid);
+
+  if (!valid) {
+    hideRootGizmo();
+    return;
+  }
+
+  target.updateWorldMatrix(true, false);
+  target.getWorldPosition(rootGizmoProxy.position);
+  rootGizmoProxy.quaternion.identity();
+  rootGizmoProxy.scale.set(1, 1, 1);
+  rootGizmoProxy.updateMatrixWorld(true);
+
+  if (rootTransformControls.object !== rootGizmoProxy) {
+    rootTransformControls.attach(rootGizmoProxy);
+  }
+
+  rootTransformControls.enabled = true;
+  rootTransformControls.getHelper().visible = true;
+}
+
+function updateRootGizmoPosition() {
+  if (!state.rootGizmoEnabled || state.rootGizmoDragging) return;
+
+  const target = findRootTargetObject();
+  if (!target) {
+    hideRootGizmo();
+    return;
+  }
+
+  target.updateWorldMatrix(true, false);
+  target.getWorldPosition(rootGizmoProxy.position);
+  rootGizmoProxy.updateMatrixWorld(true);
+}
+
 function populateRootTargetSelect(record, base) {
   const edit = ensureActionEdit(record);
   const current = edit.rootTarget || 'auto';
@@ -864,6 +964,7 @@ function renderMotionPanel() {
 
   if (!enabled) {
     els.motionPanelActionName.textContent = record ? record.name : 'Selecciona una Action';
+    requestAnimationFrame(updateRootGizmoAttachment);
     return;
   }
 
@@ -1342,6 +1443,7 @@ function playClip(clipId, options = {}) {
 
   renderActions();
   renderMotionPanel();
+  requestAnimationFrame(updateRootGizmoAttachment);
 
   const compat = compatibility(record, base);
   if (options.silent) return;
@@ -1609,6 +1711,10 @@ function clearAll() {
   state.baseAssetId = null;
   state.activeClipId = null;
   state.skeletonHelper = null;
+  state.rootGizmoEnabled = false;
+  state.rootGizmoDragging = false;
+  state.rootGizmoDrag = null;
+  hideRootGizmo();
 
   resetPlaybackUi();
   renderMotionPanel();
@@ -1757,6 +1863,7 @@ els.rootTargetSelect.addEventListener('change', () => {
   ensureActionEdit(record).rootTarget = els.rootTargetSelect.value;
   renderMotionPanel();
   refreshActivePreview();
+  requestAnimationFrame(updateRootGizmoAttachment);
 });
 
 function syncRootOffset() {
@@ -1767,6 +1874,7 @@ function syncRootOffset() {
   edit.rootOffset.y = Number(els.rootOffsetY.value) || 0;
   edit.rootOffset.z = Number(els.rootOffsetZ.value) || 0;
   refreshActivePreview();
+  requestAnimationFrame(updateRootGizmoAttachment);
 }
 
 els.rootOffsetX.addEventListener('input', syncRootOffset);
@@ -1780,6 +1888,7 @@ els.resetRootOffsetBtn.addEventListener('click', () => {
   edit.rootOffset = { x: 0, y: 0, z: 0 };
   renderMotionPanel();
   refreshActivePreview();
+  requestAnimationFrame(updateRootGizmoAttachment);
 });
 
 els.resetMotionPanelBtn.addEventListener('click', () => {
@@ -1788,6 +1897,133 @@ els.resetMotionPanelBtn.addEventListener('click', () => {
   record.edit = defaultActionEdit();
   renderMotionPanel();
   refreshActivePreview();
+});
+
+els.toggleRootGizmoBtn.addEventListener('click', () => {
+  const record = getActiveRecord();
+  const base = getBaseAsset();
+  if (!record || !base || isEmptyClip(record)) {
+    setStatus('Selecciona y reproduce una Action antes de mover su root.', 'warn');
+    return;
+  }
+
+  state.rootGizmoEnabled = !state.rootGizmoEnabled;
+  renderMotionPanel();
+  updateRootGizmoAttachment();
+
+  setStatus(
+    state.rootGizmoEnabled
+      ? 'Herramienta de traslación activa. Arrastra X, Y o Z sobre el viewport.'
+      : 'Herramienta de traslación desactivada.',
+    'info'
+  );
+});
+
+els.rootGizmoSnap.addEventListener('change', () => {
+  const step = Number(els.rootGizmoSnap.value) || 0.5;
+  setStatus('Precisión del gizmo: pasos de ' + step + ' unidades FBX.', 'info');
+});
+
+rootTransformControls.addEventListener('mouseDown', () => {
+  const record = getActiveRecord();
+  const base = getBaseAsset();
+  const target = findRootTargetObject(record, base);
+  if (!record || !base || !target) return;
+
+  controls.enabled = false;
+  state.rootGizmoDragging = true;
+
+  const edit = ensureActionEdit(record);
+  const startWorld = new THREE.Vector3();
+  rootGizmoProxy.getWorldPosition(startWorld);
+
+  target.updateWorldMatrix(true, false);
+
+  state.rootGizmoDrag = {
+    recordId: record.id,
+    target,
+    parent: target.parent || null,
+    startWorld,
+    startTargetLocal: target.position.clone(),
+    startOffset: new THREE.Vector3(
+      Number(edit.rootOffset.x) || 0,
+      Number(edit.rootOffset.y) || 0,
+      Number(edit.rootOffset.z) || 0
+    ),
+    time: state.currentAction?.time || 0,
+    wasPaused: Boolean(state.currentAction?.paused),
+  };
+
+  if (state.currentAction) state.currentAction.paused = true;
+});
+
+rootTransformControls.addEventListener('objectChange', () => {
+  const drag = state.rootGizmoDrag;
+  const record = getActiveRecord();
+  if (!state.rootGizmoDragging || !drag || !record || record.id !== drag.recordId) return;
+
+  const currentWorld = new THREE.Vector3();
+  rootGizmoProxy.getWorldPosition(currentWorld);
+
+  let deltaLocal;
+  if (drag.parent) {
+    drag.parent.updateWorldMatrix(true, false);
+    const startLocal = drag.parent.worldToLocal(drag.startWorld.clone());
+    const currentLocal = drag.parent.worldToLocal(currentWorld.clone());
+    deltaLocal = currentLocal.sub(startLocal);
+  } else {
+    deltaLocal = currentWorld.sub(drag.startWorld);
+  }
+
+  const step = Number(els.rootGizmoSnap.value) || 0.5;
+  const edit = ensureActionEdit(record);
+
+  const nextX = roundOffsetValue(drag.startOffset.x + deltaLocal.x, step);
+  const nextY = roundOffsetValue(drag.startOffset.y + deltaLocal.y, step);
+  const nextZ = roundOffsetValue(drag.startOffset.z + deltaLocal.z, step);
+
+  edit.rootOffset.x = nextX;
+  edit.rootOffset.y = nextY;
+  edit.rootOffset.z = nextZ;
+  updateRootOffsetFields(edit);
+
+  // Move the currently displayed target immediately, without rebuilding the
+  // full AnimationClip on every mouse pixel. This keeps dragging smooth.
+  const snappedDelta = new THREE.Vector3(
+    nextX - drag.startOffset.x,
+    nextY - drag.startOffset.y,
+    nextZ - drag.startOffset.z
+  );
+  drag.target.position.copy(drag.startTargetLocal).add(snappedDelta);
+  drag.target.updateMatrixWorld(true);
+});
+
+rootTransformControls.addEventListener('mouseUp', () => {
+  const drag = state.rootGizmoDrag;
+  controls.enabled = true;
+  state.rootGizmoDragging = false;
+  state.rootGizmoDrag = null;
+
+  if (!drag) {
+    updateRootGizmoAttachment();
+    return;
+  }
+
+  const record = state.clips.find((item) => item.id === drag.recordId);
+  if (record && state.mixer) {
+    playClip(record.id, {
+      preserveTime: drag.time,
+      preservePaused: drag.wasPaused,
+      silent: true,
+    });
+  }
+
+  renderMotionPanel();
+  requestAnimationFrame(updateRootGizmoAttachment);
+  setStatus('Offset guardado en la Action: X ' +
+    ensureActionEdit(record).rootOffset.x + ' · Y ' +
+    ensureActionEdit(record).rootOffset.y + ' · Z ' +
+    ensureActionEdit(record).rootOffset.z + '.', 'ok');
 });
 
 els.fitCameraBtn.addEventListener('click', () => {
@@ -1847,6 +2083,7 @@ function animate() {
   const delta = Math.min(clock.getDelta(), 0.05);
 
   if (state.mixer) state.mixer.update(delta);
+  updateRootGizmoPosition();
   controls.update();
 
   if (state.currentAction && state.previewClip && !state.isScrubbing) {
