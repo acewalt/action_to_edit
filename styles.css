@@ -239,7 +239,7 @@ button { color: inherit; }
   padding: 9px;
 }
 .action-card.active { border-color: #687481; box-shadow: inset 0 0 0 1px rgba(255,255,255,.03); }
-.action-top { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 8px; align-items: center; }
+.action-top { display: grid; grid-template-columns: 30px minmax(0,1fr) auto auto; gap: 8px; align-items: center; }
 .action-play {
   width: 30px; height: 30px; border: 1px solid var(--line-strong); background: #20262d; border-radius: 8px; cursor: pointer; font-size: 10px;
 }
@@ -250,6 +250,24 @@ button { color: inherit; }
   background: transparent; color: var(--text); font-size: 11.5px; font-weight: 650; padding: 2px 0 3px;
 }
 .action-name:focus { border-color: #596575; }
+.action-name[readonly] { cursor: default; color: var(--text); }
+.action-card.editing .action-name {
+  background: #101419;
+  border: 1px solid #596575;
+  border-radius: 7px;
+  padding: 5px 7px;
+}
+.action-rename {
+  border: 1px solid var(--line-strong);
+  background: #1c2229;
+  color: var(--soft);
+  border-radius: 7px;
+  padding: 6px 7px;
+  font-size: 8.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.action-rename:hover { background: #262e38; color: var(--text); }
 .action-origin { font-size: 9px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .include-toggle { display: flex; align-items: center; gap: 4px; font-size: 9px; color: var(--muted); cursor: pointer; }
 .include-toggle input { accent-color: #e9edf2; }
@@ -303,4 +321,7 @@ button { color: inherit; }
   .viewport-toolbar > div:first-child { flex-direction: column; align-items: flex-start; }
   .playback { grid-template-columns: 34px 1fr; }
   .speed-control { grid-column: 1 / -1; justify-content: flex-end; }
+  .action-top { grid-template-columns: 30px minmax(0,1fr) auto; }
+  .action-rename { grid-column: 2; justify-self: start; }
+  .include-toggle { grid-column: 3; grid-row: 1 / span 2; }
 }
