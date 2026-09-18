@@ -369,6 +369,9 @@ export class RestPoseEditor {
     applyRestPose(this.sourceRoot, sourceAsset.restPose);
     applyRestPose(this.targetRoot, targetAsset.restPose);
 
+    prepareRestPoseMeshes(this.sourceRoot);
+    prepareRestPoseMeshes(this.targetRoot);
+
     this.sourceGroup.add(this.sourceRoot);
     this.targetGroup.add(this.targetRoot);
 
@@ -384,17 +387,17 @@ export class RestPoseEditor {
     }
 
     cloneMaterialsForPreview(this.sourceRoot, {
-      opacity: 0.48,
+      opacity: 0.82,
       wireframe: false,
       depthWrite: true,
-      tint: 0x9fbfe0,
+      tint: 0xb9c5d0,
     });
 
     cloneMaterialsForPreview(this.targetRoot, {
-      opacity: 0.22,
-      wireframe: true,
+      opacity: 0.42,
+      wireframe: false,
       depthWrite: false,
-      tint: 0xe6bd72,
+      tint: 0xd8b477,
     });
 
     this.alignForComparison();
@@ -856,7 +859,7 @@ export class RestPoseEditor {
       const handle = new THREE.Mesh(geometry, material);
       const semantic = semanticNameForHandle(bone.name);
 
-      let scale = sourceHeight * 0.035;
+      let scale = sourceHeight * 0.052;
       if (/hips|spine|chest|head|neck/.test(semantic)) {
         scale *= 1.35;
       } else if (/hand|foot/.test(semantic)) {
@@ -869,6 +872,7 @@ export class RestPoseEditor {
       handle.userData.baseScale = scale;
       handle.userData.boneName = bone.name;
       handle.userData.bone = bone;
+      handle.userData.semantic = semantic;
       handle.renderOrder = 32;
 
       this.poseHandleGroup.add(handle);
@@ -915,10 +919,10 @@ export class RestPoseEditor {
       const bone = handle.userData.bone;
       if (!bone) continue;
 
-      bone.getWorldPosition(world);
+      getPoseHandleWorldPosition(handle, world);
       handle.position.copy(world);
 
-      // Screen-facing rings behave like Blender custom-shape "empties":
+      // Screen-facing rings behave like Blender custom-shape controls:
       // large, easy to see and easy to click from any viewing angle.
       handle.quaternion.copy(this.camera.quaternion);
     }
@@ -1454,20 +1458,41 @@ function captureWorldQuaternions(bones) {
 }
 
 function applyRestPose(object, restPose) {
-  if (!object || !restPose) return;
+  if (!object) return;
 
+  // A Source/Target asset may currently be animated in the main viewport.
+  // Skeleton.pose() restores the bind pose independently of that live state.
   object.traverse((node) => {
-    if (!node.name) return;
-
-    const rest = restPose.get(node.name);
-    if (!rest) return;
-
-    node.position.copy(rest.position);
-    node.quaternion.copy(rest.quaternion);
-    node.scale.copy(rest.scale);
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.pose();
+    }
   });
 
+  // Only restore BONE transforms from the captured import pose.
+  // Rest maps are name-based and complex Blender rigs can contain duplicate
+  // object/control names; applying those transforms to meshes/helpers can
+  // explode the preview scale. The armature/object transforms themselves are
+  // already preserved by SkeletonUtils.clone().
+  if (restPose) {
+    object.traverse((node) => {
+      if (!node.isBone || !node.name) return;
+
+      const rest = restPose.get(node.name);
+      if (!rest) return;
+
+      node.position.copy(rest.position);
+      node.quaternion.copy(rest.quaternion);
+      node.scale.copy(rest.scale);
+    });
+  }
+
   object.updateMatrixWorld(true);
+
+  object.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.update();
+    }
+  });
 }
 
 function applyBonePoseOverride(root, override) {
@@ -1594,50 +1619,74 @@ function cloneMaterialsForPreview(root, {
   root?.traverse((node) => {
     if (!node.isMesh) return;
 
-    const materials = Array.isArray(node.material)
+    const original = Array.isArray(node.material)
       ? node.material
       : [node.material];
 
-    const clones = materials.map((material) => {
-      if (!material?.clone) return material;
-
-      const copy = material.clone();
-
-      copy.transparent =
-        opacity < 0.999 ||
-        copy.transparent;
-
-      copy.opacity = opacity;
-      copy.depthWrite = depthWrite;
-
-      if ('wireframe' in copy) {
-        copy.wireframe = wireframe;
-      }
-
-      if (copy.color) {
-        copy.color.lerp(
-          new THREE.Color(tint),
-          0.38
-        );
-      }
-
-      return copy;
+    // Blender-like Solid display: never sample the FBX material, textures,
+    // normal maps, metallic maps, etc. Keep only the number of material slots
+    // so geometry groups continue to render correctly.
+    const createSolid = () => new THREE.MeshStandardMaterial({
+      color: tint,
+      roughness: 0.82,
+      metalness: 0.0,
+      transparent: opacity < 0.999,
+      opacity,
+      depthWrite,
+      wireframe,
+      side: THREE.DoubleSide,
     });
 
-    node.material =
-      Array.isArray(node.material)
-        ? clones
-        : clones[0];
+    const solids = original.map(() => createSolid());
+
+    node.material = Array.isArray(node.material)
+      ? solids
+      : solids[0];
 
     node.frustumCulled = false;
   });
 }
 
+function prepareRestPoseMeshes(root) {
+  if (!root) return;
+
+  const skinned = [];
+
+  root.traverse((node) => {
+    if (node.isSkinnedMesh) skinned.push(node);
+  });
+
+  // Retarget Rest Pose is about the deforming character, not exported
+  // controller widgets/custom shapes. CloudRig FBXs can contain large helper
+  // meshes far away from the body; showing them is what produced the gigantic
+  // black geometry in the viewport.
+  root.traverse((node) => {
+    if (!node.isMesh) return;
+
+    node.userData.__restPoseRenderable = Boolean(node.isSkinnedMesh);
+
+    if (!node.isSkinnedMesh) {
+      node.visible = false;
+    }
+  });
+
+  // Fallback for unusually simple FBXs with no SkinnedMesh at all.
+  if (!skinned.length) {
+    root.traverse((node) => {
+      if (!node.isMesh) return;
+      node.userData.__restPoseRenderable = true;
+      node.visible = true;
+    });
+  }
+}
+
 function setMeshVisibility(root, visible) {
   root?.traverse((node) => {
-    if (node.isMesh) {
-      node.visible = Boolean(visible);
-    }
+    if (!node.isMesh) return;
+
+    node.visible =
+      Boolean(visible) &&
+      node.userData.__restPoseRenderable !== false;
   });
 }
 
@@ -1675,9 +1724,18 @@ function safeBoxFromObject(object) {
 
 function chooseDisplayBoneSet(bones) {
   const names = [...bones.keys()];
+  const body = names.filter((name) => isHumanoidBodyBoneName(name));
+
+  // A humanoid Source/Target should use only the actual body chain for scale,
+  // framing and skeleton drawing. This rejects hair, face, IK, pole, stretch,
+  // custom-shape and other CloudRig helper bones.
+  if (body.length >= 10) {
+    return new Set(body);
+  }
 
   const def = names.filter((name) =>
-    /^def[-_:]/i.test(name)
+    /^def[-_:]/i.test(name) &&
+    !/(hair|face|eye|jaw|tongue|teeth|ear|cloth|skirt|breast|helper|pole|ik|mch|org)/i.test(name)
   );
 
   if (def.length >= 8) {
@@ -1695,7 +1753,7 @@ function chooseDisplayBoneSet(bones) {
 
   const fk = names.filter((name) =>
     /^fk[-_:]/i.test(name) &&
-    !/(hng|hanger)/i.test(name)
+    !/(hng|hanger|hair|face|eye|jaw|pole|ik)/i.test(name)
   );
 
   if (fk.length >= 8) {
@@ -1704,9 +1762,16 @@ function chooseDisplayBoneSet(bones) {
 
   return new Set(
     names.filter((name) =>
-      !/(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|p-str|str-|root-|ik-|hng)/i.test(name)
+      !/(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|p-str|str-|root-|ik-|hng|hair|face|eye|jaw)/i.test(name)
     )
   );
+}
+
+function isHumanoidBodyBoneName(name) {
+  const value = normalizeHandleName(name);
+
+  return /(?:hips?|pelvis|root|spine|chest|neck|head|shoulder|clavicle|upperarm|arm|forearm|lowerarm|hand|wrist|upleg|upperleg|thigh|leg|lowerleg|shin|calf|knee|foot|ankle|toe)/.test(value) &&
+    !/(hair|face|eye|jaw|tongue|teeth|ear|cloth|skirt|breast|helper|pole|ik|mch|org|ctrl|control|hng|hanger|stretch|twist|tweak|roll)/.test(value);
 }
 
 function createFilteredSkeletonView(bones, color) {
@@ -1800,70 +1865,141 @@ function updateFilteredSkeletonView(view) {
   view.line.geometry.computeBoundingSphere();
 }
 
-function semanticNameForHandle(name) {
-  let value = String(name || '')
+function normalizeHandleName(name) {
+  return String(name || '')
     .toLowerCase()
     .replace(/^mixamorig\d*[:_]?/, '')
     .replace(/^(def|fk|org|mch|ctrl)[-_:]/, '')
     .replace(/[^a-z0-9]/g, '');
+}
 
-  if (/shoulder|clavicle/.test(value)) return 'shoulder';
-  if (/upperarm/.test(value)) return 'upperarm';
-  if (/forearm|lowerarm/.test(value)) return 'forearm';
-  if (/hand|wrist/.test(value)) return 'hand';
-  if (/thigh|upperleg/.test(value)) return 'thigh';
-  if (/knee|shin|calf|lowerleg/.test(value)) return 'knee';
-  if (/foot|ankle/.test(value)) return 'foot';
+function semanticNameForHandle(name) {
+  let value = normalizeHandleName(name);
+
+  let side = '';
+
+  if (/^left/.test(value)) {
+    side = 'left';
+    value = value.replace(/^left/, '');
+  } else if (/^right/.test(value)) {
+    side = 'right';
+    value = value.replace(/^right/, '');
+  } else if (/[lr]$/.test(value)) {
+    // Three.js sanitizes ".L/.R" to a trailing L/R.
+    const stem = value.slice(0, -1);
+    if (
+      /(?:shoulder|clavicle|upperarm|forearm|lowerarm|hand|wrist|upleg|upperleg|thigh|leg|lowerleg|shin|calf|knee|foot|ankle|toe)$/.test(stem)
+    ) {
+      side = value.endsWith('l') ? 'left' : 'right';
+      value = stem;
+    }
+  }
+
+  if (/shoulder|clavicle/.test(value)) return side + 'shoulder';
+  if (/forearm|lowerarm/.test(value)) return side + 'forearm';
+  if (/upperarm/.test(value) || value === 'arm') return side + 'upperarm';
+  if (/hand|wrist/.test(value)) return side + 'hand';
+
+  if (/upleg|upperleg|thigh/.test(value)) return side + 'thigh';
+  if (/lowerleg|shin|calf|knee/.test(value) || value === 'leg') return side + 'shin';
+  if (/foot|ankle/.test(value)) return side + 'foot';
+
   if (/hips|pelvis/.test(value)) return 'hips';
   if (/chest/.test(value)) return 'chest';
   if (/spine/.test(value)) return 'spine';
   if (/neck/.test(value)) return 'neck';
   if (/head/.test(value)) return 'head';
 
-  return value;
+  return side + value;
 }
 
 function choosePoseHandleBones(bones) {
-  const result = [];
-  const used = new Set();
-
-  const preferredNames = [
+  const wanted = [
     'hips',
     'spine',
     'chest',
     'neck',
     'head',
-    'shoulder',
-    'upperarm',
-    'forearm',
-    'hand',
-    'thigh',
-    'knee',
-    'foot',
+
+    'leftshoulder',
+    'leftupperarm',
+    'leftforearm',
+    'lefthand',
+
+    'rightshoulder',
+    'rightupperarm',
+    'rightforearm',
+    'righthand',
+
+    'leftthigh',
+    'leftshin',
+    'leftfoot',
+
+    'rightthigh',
+    'rightshin',
+    'rightfoot',
   ];
 
-  for (const semantic of preferredNames) {
-    for (const [name, bone] of bones) {
-      if (used.has(name)) continue;
+  const best = new Map();
 
-      const lower = String(name).toLowerCase();
+  const scoreBone = (name) => {
+    const n = String(name || '').toLowerCase();
+    let score = 0;
 
-      if (
-        /(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|ik-|hng|p-str|str-)/i.test(lower)
-      ) {
-        continue;
-      }
+    if (/^mixamorig/.test(n)) score += 100;
+    if (/^def[-_:]/.test(n)) score += 90;
+    if (/^fk[-_:]/.test(n)) score += 80;
 
-      if (semanticNameForHandle(name) !== semantic) {
-        continue;
-      }
+    if (/(mch|org|ctrl|control|pole|target|line-|dsp-|snap-|scale-|ik-|hng|p-str|str-|twist|tweak|roll)/i.test(n)) {
+      score -= 100;
+    }
 
-      result.push(bone);
-      used.add(name);
+    return score;
+  };
+
+  for (const [name, bone] of bones) {
+    const semantic = semanticNameForHandle(name);
+    if (!wanted.includes(semantic)) continue;
+
+    const current = best.get(semantic);
+    if (
+      !current ||
+      scoreBone(name) > scoreBone(current.name)
+    ) {
+      best.set(semantic, bone);
     }
   }
 
-  return result;
+  return wanted
+    .map((semantic) => best.get(semantic))
+    .filter(Boolean);
+}
+
+function getPoseHandleWorldPosition(handle, target = new THREE.Vector3()) {
+  const bone = handle?.userData?.bone;
+  if (!bone) return target.set(0, 0, 0);
+
+  bone.getWorldPosition(target);
+
+  const semantic = handle.userData.semantic || '';
+
+  // Put limb controls in the middle of their segment, like Blender custom
+  // shapes, instead of stacking all controls on shoulder/elbow/knee joints.
+  if (
+    /shoulder|upperarm|forearm|thigh|shin/.test(semantic)
+  ) {
+    const child =
+      bone.children.find((item) => item.isBone) ||
+      null;
+
+    if (child) {
+      const childWorld = new THREE.Vector3();
+      child.getWorldPosition(childWorld);
+      target.lerp(childWorld, 0.5);
+    }
+  }
+
+  return target;
 }
 
 function findOppositeBoneName(name, names) {
