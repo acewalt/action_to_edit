@@ -17,8 +17,8 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-48';
-import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-48';
+} from './retargeting.js?v=20260918-49';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-49';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -153,6 +153,7 @@ const els = {
   retargetTargetBonesList: $('#retargetTargetBonesList'),
   retargetAutoScale: $('#retargetAutoScale'),
   retargetWorldLocation: $('#retargetWorldLocation'),
+  retargetTransferRootMotion: $('#retargetTransferRootMotion'),
   retargetAutoBakeIk: $('#retargetAutoBakeIk'),
   retargetRestMode: $('#retargetRestMode'),
   retargetRestRotationOnly: $('#retargetRestRotationOnly'),
@@ -1505,12 +1506,53 @@ function restoreAssetImportedRest(asset, object = asset?.object) {
   return restoredExact || Boolean(asset.restPose);
 }
 
-function resetBasePlaybackToImportedRest(base) {
+function restoreAssetBindPoseForRetarget(asset, object = asset?.object) {
+  if (!asset || !object) return false;
+
+  // Preserve imported object/root scale and orientation, but put only the
+  // skeleton into the true bind/rest pose. Retarget clips are baked against
+  // this state and must also be previewed from this state.
+  const snapshot = asset.restHierarchy;
+  const nodes = [];
+  object.traverse((node) => nodes.push(node));
+
+  if (Array.isArray(snapshot) && snapshot.length === nodes.length) {
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const rest = snapshot[i];
+      if (!rest) continue;
+
+      if (Array.isArray(rest.position)) node.position.fromArray(rest.position);
+      if (Array.isArray(rest.quaternion)) {
+        node.quaternion.fromArray(rest.quaternion).normalize();
+      }
+      if (Array.isArray(rest.scale)) node.scale.fromArray(rest.scale);
+      node.visible = rest.visible !== false;
+    }
+  }
+
+  const skeletons = new Set();
+  object.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) skeletons.add(node.skeleton);
+  });
+
+  for (const skeleton of skeletons) {
+    try {
+      skeleton.pose();
+    } catch {
+      // Keep imported hierarchy for malformed skeletons.
+    }
+  }
+
+  object.updateMatrixWorld(true);
+  for (const skeleton of skeletons) skeleton.update();
+
+  return true;
+}
+
+function resetBasePlaybackBaseline(base, { bindPose = false } = {}) {
   if (!base || !state.actionTransformNode) return;
 
-  // Throw away AnimationMixer binding caches as well as active actions.
-  // PropertyMixer caches "original" values when a track first binds; reusing
-  // those caches can make a sparse Action inherit a pose from an older Action.
   if (state.mixer) {
     try {
       state.mixer.stopAllAction();
@@ -1524,7 +1566,11 @@ function resetBasePlaybackToImportedRest(base) {
   state.actionTransformNode.quaternion.identity();
   state.actionTransformNode.scale.set(1, 1, 1);
 
-  restoreAssetImportedRest(base, base.object);
+  if (bindPose) {
+    restoreAssetBindPoseForRetarget(base, base.object);
+  } else {
+    restoreAssetImportedRest(base, base.object);
+  }
 
   state.actionTransformNode.updateMatrixWorld(true);
   state.mixer = new THREE.AnimationMixer(state.actionTransformNode);
@@ -2756,10 +2802,17 @@ function playClip(clipId, options = {}) {
     return;
   }
 
-  // Every Action starts from the target FBX's imported bind/rest pose.
-  // No transform from a previously played Target Action is allowed to carry
-  // over. A brand-new mixer also discards cached "original state" bindings.
-  resetBasePlaybackToImportedRest(base);
+  // Existing FBX Actions use the imported animation hierarchy. Retargeted
+  // Actions are baked from the true bind pose and must be previewed from that
+  // same bind pose. This avoids both previous-Action contamination and giant
+  // baseline tracks inside the generated clip.
+  const useRetargetBindPose =
+    Boolean(record.retargetInfo?.targetReady) &&
+    record.retargetInfo?.targetAssetId === base.id;
+
+  resetBasePlaybackBaseline(base, {
+    bindPose: useRetargetBindPose,
+  });
 
   const clip = makeClipForBase(record, base);
   const action = state.mixer.clipAction(clip, state.actionTransformNode);
@@ -5621,6 +5674,10 @@ async function importRetargetPresetFile(file) {
 }
 
 function openRetargetingWindow() {
+  if (els.retargetTransferRootMotion) {
+    els.retargetTransferRootMotion.checked = false;
+  }
+
   if (state.assets.length < 1) {
     setStatus('Importa al menos un FBX antes de abrir Retargeting.', 'warn');
     return;
@@ -5760,6 +5817,7 @@ async function applyCurrentRetargeting() {
       targetPrefix: els.retargetTargetPrefix.value.trim(),
       autoScale: els.retargetAutoScale.checked,
       useWorldLocation: els.retargetWorldLocation.checked,
+      transferRootMotion: els.retargetTransferRootMotion.checked,
       sampleFps: Number(els.retargetSampleFps.value) || 30,
       sourceRestMode: els.retargetRestMode.value,
       sourceRestRotationOnly: els.retargetRestRotationOnly.checked,
@@ -5798,21 +5856,9 @@ async function applyCurrentRetargeting() {
       empty: false,
       include: true,
       edit: (() => {
-        const outputEdit = defaultActionEdit();
-        const sourceEdit = ensureActionEdit(sourceRecord);
-        const rootScale = els.retargetAutoScale.checked
-          ? (Number(result.report.scaleRatio) || 1)
-          : 1;
-
-        outputEdit.rootOffset = {
-          x: (Number(sourceEdit.rootOffset?.x) || 0) * rootScale,
-          y: (Number(sourceEdit.rootOffset?.y) || 0) * rootScale,
-          z: (Number(sourceEdit.rootOffset?.z) || 0) * rootScale,
-        };
-        outputEdit.rootQuaternion = {
-          ...sourceEdit.rootQuaternion,
-        };
-        return outputEdit;
+        // Brand-new Target Action: no inherited whole-rig offset/rotation,
+        // no previous Target Action state, no Source Action Transform.
+        return defaultActionEdit();
       })(),
       retargetInfo: {
         sourceAssetId: sourceAsset.id,
@@ -5829,6 +5875,8 @@ async function applyCurrentRetargeting() {
           result.report.influentialTargetBoneCount || 0,
         restBaselineBoneCount:
           result.report.restBaselineBoneCount || 0,
+        transferRootMotion:
+          els.retargetTransferRootMotion.checked,
         fkIkMappingEnabled:
           els.retargetEnableFkIkMapping.checked,
         ikBakedChains: result.report.ikBakedChains || 0,
@@ -5883,7 +5931,10 @@ async function applyCurrentRetargeting() {
       (result.report.fkResolvedPairs || 0) +
       '/' +
       (result.report.fkRequestedPairs || 0) +
-      (fkOnlyMode ? ' · modo FK puro' : '');
+      (fkOnlyMode ? ' · modo FK puro' : '') +
+      (els.retargetTransferRootMotion.checked
+        ? ' · Root Motion ON'
+        : ' · Root Motion OFF');
 
     const redirectedCount =
       result.report.redirectedPairs?.length || 0;
@@ -6162,6 +6213,15 @@ els.retargetAutoBakeIk.addEventListener('change', () => {
       'FK→IK web activo: primero se hornea FK/deform sobre el Target y después se generan los 4 end-effectors/poles usando la geometría ya retargeteada, siguiendo el orden de BlendCap.'
     );
   }
+});
+
+els.retargetTransferRootMotion.addEventListener('change', () => {
+  setRetargetProgress(
+    0,
+    els.retargetTransferRootMotion.checked
+      ? 'Root Motion activado: se transferirán las posiciones LOC del preset.'
+      : 'Root Motion desactivado: retarget FK centrado, sin posiciones root/hips.'
+  );
 });
 
 els.retargetEnableFkIkMapping.addEventListener('change', () => {
