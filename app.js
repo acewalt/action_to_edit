@@ -188,7 +188,7 @@ function compatibility(record, baseAsset) {
 
 function makeClipForBase(record, baseAsset, usedNames = null) {
   const clip = record.clip.clone();
-  let exportName = (record.name || record.originalName || 'Action').trim() || 'Action';
+  let exportName = (record.name || record.clip?.name || record.originalName || 'Action').trim() || 'Action';
 
   if (usedNames) {
     const rootName = exportName;
@@ -342,6 +342,7 @@ function renderActions() {
 
     const saveRename = () => {
       record.name = nameInput.value.trim() || record.originalName || 'Action';
+      record.clip.name = record.name;
       nameInput.value = record.name;
       nameInput.readOnly = true;
       node.classList.remove('editing');
@@ -558,8 +559,8 @@ async function importFiles(fileList) {
         const cloned = clip.clone();
         const originalName = (cloned.name || '').trim() || stripExt(file.name) + '_Action_' + (clipIndex + 1);
         const isEmpty = cloned.tracks.length === 0 || cloned.duration <= 1e-6;
-        const genericName = /^(mixamo\.com|take\s*\d+|animationstack::mixamo\.com)$/i.test(originalName);
-        const displayName = !isEmpty && genericName ? stripExt(file.name) : originalName;
+
+        // El nombre editable empieza SIEMPRE con el nombre interno real del AnimationClip.
         cloned.name = originalName;
 
         const record = {
@@ -568,7 +569,7 @@ async function importFiles(fileList) {
           sourceFile: file.name,
           sourceRootName: object.name || '',
           originalName,
-          name: displayName,
+          name: originalName,
           clip: cloned,
           empty: isEmpty,
           include: !isEmpty,
