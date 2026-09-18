@@ -2076,6 +2076,54 @@ function buildExportClips(base) {
   return getIncludedClips().map((record) => makeClipForBase(record, base, usedNames));
 }
 
+function isolateExportRigResources(exportRig) {
+  // SkeletonUtils.clone() correctly remaps cloned bones, but Three.js
+  // Skeleton.clone() passes boneInverses into the new Skeleton by reference.
+  // rebuildExportBindPose() calls calculateInverses(), which clears/rebuilds
+  // that array. Without this copy the LIVE viewport skeleton is corrupted as
+  // soon as an export starts.
+  exportRig.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.boneInverses = node.skeleton.boneInverses.map(
+        (inverse) => inverse.clone()
+      );
+
+      // The exporter should not share mutable mesh data with the live preview
+      // either. Textures can safely stay shared; geometry/material instances
+      // themselves are detached.
+      if (node.geometry) {
+        node.geometry = node.geometry.clone();
+      }
+
+      if (Array.isArray(node.material)) {
+        node.material = node.material.map((material) =>
+          material?.clone ? material.clone() : material
+        );
+      } else if (node.material?.clone) {
+        node.material = node.material.clone();
+      }
+
+      node.bindMatrix = node.bindMatrix.clone();
+      node.bindMatrixInverse = node.bindMatrixInverse.clone();
+    } else if (node.isMesh) {
+      if (node.geometry) {
+        node.geometry = node.geometry.clone();
+      }
+
+      if (Array.isArray(node.material)) {
+        node.material = node.material.map((material) =>
+          material?.clone ? material.clone() : material
+        );
+      } else if (node.material?.clone) {
+        node.material = node.material.clone();
+      }
+    }
+  });
+
+  exportRig.updateMatrixWorld(true);
+  return exportRig;
+}
+
 function buildCleanExportRoot(base, clips) {
   // Export hierarchy:
   // static destination correction
@@ -2092,6 +2140,7 @@ function buildCleanExportRoot(base, clips) {
   exportContainer.add(exportActionTransform);
 
   const exportRig = SkeletonUtils.clone(base.object);
+  isolateExportRigResources(exportRig);
   applyRestPose(exportRig, base.restPose);
   exportActionTransform.add(exportRig);
 
@@ -2121,6 +2170,11 @@ function rebuildExportBindPose(exportRoot) {
     // Recalculate the inverse bind matrices from the current rest pose once
     // per skeleton, then bind this mesh using its current world transform.
     if (!reboundSkeletons.has(node.skeleton)) {
+      // Never mutate an inverse array that might have originated from another
+      // Skeleton instance. Matrix4 objects are copied as well.
+      node.skeleton.boneInverses = node.skeleton.boneInverses.map(
+        (inverse) => inverse.clone()
+      );
       node.skeleton.calculateInverses();
       reboundSkeletons.add(node.skeleton);
     }
@@ -2188,7 +2242,7 @@ async function exportFBX() {
 
   state.exporting = true;
   updateExportState();
-  setStatus('Generando FBX en clon aislado · el preview no se modificará · ' + clips.length + ' actions...', 'info');
+  setStatus('Generando FBX con skin/bind pose totalmente aislado · ' + clips.length + ' actions...', 'info');
 
   try {
     const exportRoot = buildCleanExportRoot(base, clips);
@@ -2239,7 +2293,7 @@ async function exportGLB() {
 
   state.exporting = true;
   updateExportState();
-  setStatus('Generando GLB en clon aislado · el preview no se modificará...', 'info');
+  setStatus('Generando GLB con recursos totalmente aislados del preview...', 'info');
 
   try {
     const exportRoot = buildCleanExportRoot(base, clips);
