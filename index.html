@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Action to Edit — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260918-26" />
+  <link rel="stylesheet" href="./styles.css?v=20260918-27" />
   <script type="importmap">
   {
     "imports": {
@@ -74,6 +74,7 @@
               <span id="activeActionBadge" class="pill muted">Sin acción</span>
             </div>
             <div class="toolbar-actions">
+              <button id="openRetargetBtn" class="icon-button retarget-open-button" type="button">Retargeting</button>
               <button id="toggleMotionPanelBtn" class="icon-button" type="button">Ajustes</button>
               <button id="toggleSkeletonBtn" class="icon-button" type="button" disabled>Esqueleto</button>
               <button id="fitCameraBtn" class="icon-button" type="button" disabled>Encuadrar</button>
@@ -365,6 +366,194 @@
     </main>
   </div>
 
+  <div id="retargetOverlay" class="retarget-overlay is-hidden" aria-hidden="true">
+    <section class="retarget-window" role="dialog" aria-modal="true" aria-labelledby="retargetTitle">
+      <header class="retarget-header">
+        <div>
+          <p class="eyebrow">ACTION TO EDIT</p>
+          <h2 id="retargetTitle">Retargeting</h2>
+          <span id="retargetSubtitle">Transferencia de animación entre rigs FBX</span>
+        </div>
+        <button id="closeRetargetBtn" class="retarget-close" type="button" aria-label="Cerrar">×</button>
+      </header>
+
+      <div class="retarget-body">
+        <section class="retarget-setup-card">
+          <div class="retarget-rig-grid">
+            <label class="retarget-field">
+              <span>Source Rig</span>
+              <select id="retargetSourceRig"></select>
+            </label>
+            <label class="retarget-field">
+              <span>Target Rig</span>
+              <select id="retargetTargetRig"></select>
+            </label>
+            <label class="retarget-field">
+              <span>Source Action</span>
+              <select id="retargetSourceAction"></select>
+            </label>
+            <label class="retarget-field">
+              <span>Preset</span>
+              <select id="retargetPreset">
+                <option value="__AUTO__">Auto-Match por nombres</option>
+                <optgroup id="retargetBlendCapPresetGroup" label="BlendCap · Standard Presets"></optgroup>
+                <optgroup id="retargetCustomPresetGroup" label="Custom Presets"></optgroup>
+              </select>
+            </label>
+          </div>
+
+          <div class="retarget-preset-tools">
+            <button id="retargetReloadPresetBtn" type="button">Recargar preset</button>
+            <button id="retargetImportPresetBtn" type="button">Importar JSON</button>
+            <button id="retargetSavePresetBtn" type="button">Guardar Map As…</button>
+            <button id="retargetExportPresetBtn" type="button">Exportar map JSON</button>
+            <input id="retargetPresetFileInput" type="file" accept=".json,application/json" hidden />
+          </div>
+
+          <div class="retarget-prefix-grid">
+            <label class="retarget-field">
+              <span>Source Prefix</span>
+              <input id="retargetSourcePrefix" type="text" placeholder="mixamorig:" />
+            </label>
+            <label class="retarget-field">
+              <span>Target Prefix</span>
+              <input id="retargetTargetPrefix" type="text" placeholder="rig:" />
+            </label>
+            <button id="retargetDetectPrefixesBtn" class="retarget-small-button" type="button">Detectar prefijos</button>
+          </div>
+        </section>
+
+        <section class="retarget-map-card">
+          <div class="retarget-map-head">
+            <div>
+              <strong>Bone Map</strong>
+              <span id="retargetValidPairs">0 / 0 pairs valid</span>
+            </div>
+            <label class="retarget-search">
+              <span>⌕</span>
+              <input id="retargetPairSearch" type="search" placeholder="Buscar source o target…" />
+            </label>
+          </div>
+
+          <div class="retarget-map-tools">
+            <button id="retargetAddPairBtn" type="button">＋ Add Pair</button>
+            <button id="retargetAddAllBtn" type="button">Add All</button>
+            <button id="retargetAutoMatchBtn" type="button">Auto-Match</button>
+            <button id="retargetSortAZBtn" type="button">A-Z</button>
+            <button id="retargetSortStandardBtn" type="button">Sort</button>
+            <button id="retargetClearPairsBtn" type="button">Clear</button>
+          </div>
+
+          <div class="retarget-table-wrap">
+            <table class="retarget-table">
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Target</th>
+                  <th>Channels</th>
+                  <th>Axes</th>
+                  <th>Anchor</th>
+                  <th>Influence</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="retargetPairTableBody"></tbody>
+            </table>
+          </div>
+          <datalist id="retargetSourceBonesList"></datalist>
+          <datalist id="retargetTargetBonesList"></datalist>
+        </section>
+
+        <aside class="retarget-options-card">
+          <div class="retarget-options-section">
+            <strong>Aplicar Retargeting</strong>
+            <label class="retarget-check">
+              <input id="retargetAutoScale" type="checkbox" checked />
+              <span>Auto-scale to Target</span>
+            </label>
+            <label class="retarget-check">
+              <input id="retargetWorldLocation" type="checkbox" />
+              <span>Read Source Location in World Space</span>
+            </label>
+            <label class="retarget-check">
+              <input id="retargetAutoBakeIk" type="checkbox" />
+              <span>Auto-bake IK on Apply</span>
+            </label>
+
+            <label class="retarget-field">
+              <span>Source Rest Pose</span>
+              <select id="retargetRestMode">
+                <option value="original">Rest original del FBX</option>
+                <option value="firstFrame">Primer frame de la Action</option>
+              </select>
+            </label>
+            <label class="retarget-check retarget-rest-sub">
+              <input id="retargetRestRotationOnly" type="checkbox" checked />
+              <span>Solo rotación para el Rest override</span>
+            </label>
+
+            <label class="retarget-field">
+              <span>Bake FPS</span>
+              <select id="retargetSampleFps">
+                <option value="24">24 fps</option>
+                <option value="30" selected>30 fps</option>
+                <option value="60">60 fps</option>
+              </select>
+            </label>
+          </div>
+
+          <details class="retarget-details">
+            <summary>Advanced</summary>
+            <div class="retarget-details-body">
+              <label class="retarget-field">
+                <span>Head (Source)</span>
+                <input id="retargetHeadSource" type="text" list="retargetSourceBonesList" />
+              </label>
+              <label class="retarget-field">
+                <span>Head (Target)</span>
+                <input id="retargetHeadTarget" type="text" list="retargetTargetBonesList" />
+              </label>
+            </div>
+          </details>
+
+          <details class="retarget-details">
+            <summary>FK → IK Mapping</summary>
+            <div class="retarget-details-body">
+              <p class="retarget-note">Se conserva dentro del preset. En web se usa para identificar controles disponibles; el bake principal sigue siendo FK sobre huesos del FBX.</p>
+              <div id="retargetIkChains" class="retarget-ik-list"></div>
+            </div>
+          </details>
+
+          <details class="retarget-details">
+            <summary>Custom IK Source Bones</summary>
+            <div class="retarget-details-body">
+              <label class="retarget-check">
+                <input id="retargetCustomIkEnabled" type="checkbox" />
+                <span>Use Custom IK Source Bones</span>
+              </label>
+              <div id="retargetCustomIkFields" class="retarget-custom-ik-grid"></div>
+            </div>
+          </details>
+
+          <div class="retarget-license-note">
+            Los presets “BlendCap” se leen desde el repositorio público de BlendCap y conservan su licencia GPL-3.0-or-later. El motor web de esta página es una implementación propia sobre Three.js.
+          </div>
+        </aside>
+      </div>
+
+      <footer class="retarget-footer">
+        <div class="retarget-progress-wrap">
+          <div class="retarget-progress-track"><span id="retargetProgressBar"></span></div>
+          <span id="retargetProgressText">Listo.</span>
+        </div>
+        <div class="retarget-footer-actions">
+          <button id="retargetCancelBtn" class="secondary-button retarget-footer-button" type="button">Cerrar</button>
+          <button id="applyRetargetBtn" class="primary-button retarget-footer-button" type="button">Aplicar Retargeting</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
   <template id="assetTemplate">
     <article class="asset-card">
       <label class="asset-main">
@@ -401,6 +590,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260918-26"></script>
+  <script type="module" src="./app.js?v=20260918-27"></script>
 </body>
 </html>
