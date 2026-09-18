@@ -121,6 +121,15 @@ function getIncludedClips() {
   return state.clips.filter((record) => record.include);
 }
 
+function isEmptyClip(record) {
+  return Boolean(
+    record?.empty ||
+    !record?.clip ||
+    record.clip.tracks.length === 0 ||
+    record.clip.duration <= 1e-6
+  );
+}
+
 function countBones(object) {
   let n = 0;
   object.traverse((node) => { if (node.isBone) n += 1; });
@@ -278,12 +287,15 @@ function renderAssets() {
 function renderActions() {
   const query = els.actionSearch.value.trim().toLowerCase();
   const base = getBaseAsset();
-  const visible = state.clips
-    .filter((record) => {
-      if (!query) return true;
-      return record.name.toLowerCase().includes(query) || record.sourceFile.toLowerCase().includes(query);
-    })
-    .sort((a, b) => Number(Boolean(a.empty)) - Number(Boolean(b.empty)));
+  const filtered = state.clips.filter((record) => {
+    if (!query) return true;
+    return record.name.toLowerCase().includes(query) || record.sourceFile.toLowerCase().includes(query);
+  });
+
+  // Dos grupos físicos: las actions útiles SIEMPRE primero; las vacías SIEMPRE al final.
+  const usefulActions = filtered.filter((record) => !isEmptyClip(record));
+  const emptyActions = filtered.filter((record) => isEmptyClip(record));
+  const visible = [...usefulActions, ...emptyActions];
 
   els.actionCount.textContent = String(state.clips.length);
   els.actionList.innerHTML = '';
@@ -297,15 +309,28 @@ function renderActions() {
     return;
   }
 
+  let emptyDividerInserted = false;
+
   for (const record of visible) {
+    const empty = isEmptyClip(record);
+
+    if (empty && !emptyDividerInserted) {
+      const divider = document.createElement('div');
+      divider.className = 'action-group-divider';
+      divider.innerHTML =
+        '<span>Sin tracks</span><span>' + emptyActions.length + '</span>';
+      els.actionList.appendChild(divider);
+      emptyDividerInserted = true;
+    }
+
     const node = els.actionTemplate.content.firstElementChild.cloneNode(true);
     node.dataset.clipId = record.id;
     node.classList.toggle('active', record.id === state.activeClipId);
-    node.classList.toggle('empty-action', Boolean(record.empty));
+    node.classList.toggle('empty-action', empty);
 
     const playButton = node.querySelector('.action-play');
-    playButton.disabled = Boolean(record.empty);
-    playButton.title = record.empty ? 'Esta action no contiene tracks' : 'Reproducir';
+    playButton.disabled = empty;
+    playButton.title = empty ? 'Esta action no contiene tracks' : 'Reproducir';
     playButton.addEventListener('click', () => playClip(record.id));
 
     const nameInput = node.querySelector('.action-name');
@@ -582,7 +607,7 @@ async function importFiles(fileList) {
   }
 
   const actionTotal = state.clips.length;
-  const usefulTotal = state.clips.filter((record) => !record.empty).length;
+  const usefulTotal = state.clips.filter((record) => !isEmptyClip(record)).length;
   if (imported) {
     setStatus(
       'Importados ' + imported + ' FBX · ' + actionTotal + ' actions detectadas · ' + usefulTotal + ' útiles para reproducir/exportar' +
@@ -600,7 +625,7 @@ function playClip(clipId) {
     return;
   }
 
-  if (record.empty || record.clip.tracks.length === 0 || record.clip.duration <= 1e-6) {
+  if (isEmptyClip(record)) {
     setStatus('"' + record.name + '" está vacía: no contiene tracks de animación reproducibles.', 'warn');
     return;
   }
@@ -833,7 +858,7 @@ els.selectAllActionsBtn.addEventListener('click', () => {
 els.deselectEmptyActionsBtn.addEventListener('click', () => {
   let changed = 0;
   state.clips.forEach((record) => {
-    if (record.empty && record.include) {
+    if (isEmptyClip(record) && record.include) {
       record.include = false;
       changed += 1;
     }
