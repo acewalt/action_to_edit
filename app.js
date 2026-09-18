@@ -1507,47 +1507,7 @@ function restoreAssetImportedRest(asset, object = asset?.object) {
 }
 
 function restoreAssetBindPoseForRetarget(asset, object = asset?.object) {
-  if (!asset || !object) return false;
-
-  // Preserve imported object/root scale and orientation, but put only the
-  // skeleton into the true bind/rest pose. Retarget clips are baked against
-  // this state and must also be previewed from this state.
-  const snapshot = asset.restHierarchy;
-  const nodes = [];
-  object.traverse((node) => nodes.push(node));
-
-  if (Array.isArray(snapshot) && snapshot.length === nodes.length) {
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      const rest = snapshot[i];
-      if (!rest) continue;
-
-      if (Array.isArray(rest.position)) node.position.fromArray(rest.position);
-      if (Array.isArray(rest.quaternion)) {
-        node.quaternion.fromArray(rest.quaternion).normalize();
-      }
-      if (Array.isArray(rest.scale)) node.scale.fromArray(rest.scale);
-      node.visible = rest.visible !== false;
-    }
-  }
-
-  const skeletons = new Set();
-  object.traverse((node) => {
-    if (node.isSkinnedMesh && node.skeleton) skeletons.add(node.skeleton);
-  });
-
-  for (const skeleton of skeletons) {
-    try {
-      skeleton.pose();
-    } catch {
-      // Keep imported hierarchy for malformed skeletons.
-    }
-  }
-
-  object.updateMatrixWorld(true);
-  for (const skeleton of skeletons) skeleton.update();
-
-  return true;
+  return restoreAssetImportedRest(asset, object);
 }
 
 function resetBasePlaybackBaseline(base, { bindPose = false } = {}) {
@@ -2802,16 +2762,11 @@ function playClip(clipId, options = {}) {
     return;
   }
 
-  // Existing FBX Actions use the imported animation hierarchy. Retargeted
-  // Actions are baked from the true bind pose and must be previewed from that
-  // same bind pose. This avoids both previous-Action contamination and giant
-  // baseline tracks inside the generated clip.
-  const useRetargetBindPose =
-    Boolean(record.retargetInfo?.targetReady) &&
-    record.retargetInfo?.targetAssetId === base.id;
-
+  // Retarget Actions are evaluated from the same exact unanimated FBX
+  // hierarchy used during the bake. Never rebuild CloudRig/Rigify from skin
+  // inverse-bind matrices here; that is what caused the giant target.
   resetBasePlaybackBaseline(base, {
-    bindPose: useRetargetBindPose,
+    bindPose: false,
   });
 
   const clip = makeClipForBase(record, base);
@@ -5883,6 +5838,7 @@ async function applyCurrentRetargeting() {
         ikSkippedChains: result.report.ikSkippedChains || [],
         fkRequestedPairs: result.report.fkRequestedPairs || 0,
         fkResolvedPairs: result.report.fkResolvedPairs || 0,
+        fkMappings: result.report.fkMappings || [],
         generatedTrackCount: result.report.generatedTrackCount || 0,
         generatedRotationTracks: result.report.generatedRotationTracks || 0,
         generatedPositionTracks: result.report.generatedPositionTracks || 0,
@@ -5983,6 +5939,7 @@ async function applyCurrentRetargeting() {
         fkNote +
         trackNote +
         deformNote +
+        ' · Rest FBX importado' +
         baselineNote +
         ikNote2
     );
