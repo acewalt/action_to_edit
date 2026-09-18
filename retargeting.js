@@ -199,30 +199,46 @@ export function detectPrefix(boneNames, expectedShortNames = [], fallback = '') 
   const set = new Set(boneNames || []);
   const names = [...new Set((expectedShortNames || []).filter(Boolean))];
 
+  // Three.js removes binding-reserved characters (: . / []) from FBX node
+  // names. Compare a compact browser form so "FK-UpperArm.L" can match
+  // "FK-UpperArmL" and "mixamorig1:LeftArm" can be detected as mixamorig1.
+  const bindingKey = (value) =>
+    String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  const available = new Set([...set].map(bindingKey));
+
   const score = (prefix) => {
     let count = 0;
     for (const short of names) {
-      if (set.has(short) || set.has(prefix + short)) count += 1;
+      if (available.has(bindingKey(prefix + short))) count += 1;
     }
     return count;
   };
 
-  let best = fallback || '';
-  let bestScore = score(best);
+  const candidates = new Set(['', fallback || '']);
 
-  const counts = new Map();
   for (const bone of set) {
     for (const short of names) {
-      if (!short || bone === short || !bone.endsWith(short)) continue;
-      const prefix = bone.slice(0, bone.length - short.length);
-      if (!prefix || !/[:_.-]$/.test(prefix)) continue;
-      counts.set(prefix, (counts.get(prefix) || 0) + 1);
+      if (!short) continue;
+
+      if (
+        bone.toLowerCase().endsWith(short.toLowerCase()) &&
+        bone.length > short.length
+      ) {
+        candidates.add(bone.slice(0, bone.length - short.length));
+      }
     }
   }
 
-  for (const [prefix] of counts) {
+  let best = '';
+  let bestScore = -1;
+
+  for (const prefix of candidates) {
     const current = score(prefix);
-    if (current > bestScore) {
+    if (
+      current > bestScore ||
+      (current === bestScore && prefix.length < best.length)
+    ) {
       best = prefix;
       bestScore = current;
     }
