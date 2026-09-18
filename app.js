@@ -67,6 +67,17 @@ const els = {
   rootMoveSnapSelect: $('#rootMoveSnapSelect'),
   rootRotateSnapSelect: $('#rootRotateSnapSelect'),
   rootGizmoHelp: $('#rootGizmoHelp'),
+  limbDetectedLabel: $('#limbDetectedLabel'),
+  limbSlotSelect: $('#limbSlotSelect'),
+  limbBoneSelect: $('#limbBoneSelect'),
+  limbAllowStretch: $('#limbAllowStretch'),
+  limbOffsetX: $('#limbOffsetX'),
+  limbOffsetY: $('#limbOffsetY'),
+  limbOffsetZ: $('#limbOffsetZ'),
+  limbRotationX: $('#limbRotationX'),
+  limbRotationY: $('#limbRotationY'),
+  limbRotationZ: $('#limbRotationZ'),
+  resetLimbOffsetBtn: $('#resetLimbOffsetBtn'),
   toggleSkeletonBtn: $('#toggleSkeletonBtn'),
   fitCameraBtn: $('#fitCameraBtn'),
   statusBar: $('#statusBar'),
@@ -106,6 +117,7 @@ const state = {
   rootRotateSnap: 5,
   rootGizmoDragging: false,
   rootGizmoDrag: null,
+  activeLimbKey: 'leftHand',
   isScrubbing: false,
   exporting: false,
 };
@@ -261,6 +273,30 @@ function isEmptyClip(record) {
   );
 }
 
+function defaultLimbOffset() {
+  return {
+    bone: 'auto',
+    position: { x: 0, y: 0, z: 0 },
+    quaternion: { x: 0, y: 0, z: 0, w: 1 },
+    allowStretch: false,
+  };
+}
+
+const LIMB_KEYS = ['leftHand', 'rightHand', 'leftFoot', 'rightFoot'];
+
+function ensureLimbOffsets(edit) {
+  if (!edit.limbOffsets) edit.limbOffsets = {};
+  for (const key of LIMB_KEYS) {
+    if (!edit.limbOffsets[key]) edit.limbOffsets[key] = defaultLimbOffset();
+    const limb = edit.limbOffsets[key];
+    if (!limb.position) limb.position = { x: 0, y: 0, z: 0 };
+    if (!limb.quaternion) limb.quaternion = { x: 0, y: 0, z: 0, w: 1 };
+    if (typeof limb.allowStretch !== 'boolean') limb.allowStretch = false;
+    if (!limb.bone) limb.bone = 'auto';
+  }
+  return edit.limbOffsets;
+}
+
 function defaultActionEdit() {
   return {
     overdrive: 50,
@@ -270,6 +306,12 @@ function defaultActionEdit() {
     mirror: false,
     rootOffset: { x: 0, y: 0, z: 0 },
     rootQuaternion: { x: 0, y: 0, z: 0, w: 1 },
+    limbOffsets: {
+      leftHand: defaultLimbOffset(),
+      rightHand: defaultLimbOffset(),
+      leftFoot: defaultLimbOffset(),
+      rightFoot: defaultLimbOffset(),
+    },
   };
 }
 
@@ -298,6 +340,7 @@ function ensureActionEdit(record) {
   if (!record) return defaultActionEdit();
   if (!record.edit) record.edit = defaultActionEdit();
   if (!record.edit.rootOffset) record.edit.rootOffset = { x: 0, y: 0, z: 0 };
+  ensureLimbOffsets(record.edit);
 
   if (!record.edit.rootQuaternion) {
     const legacyEuler = record.edit.rootRotation || { x: 0, y: 0, z: 0 };
@@ -321,6 +364,105 @@ function ensureActionEdit(record) {
 
 function getActiveRecord() {
   return state.clips.find((record) => record.id === state.activeClipId) || null;
+}
+
+function normalizeBoneToken(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/mixamorig[:_]?/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function boneSideScore(name, side) {
+  const raw = String(name || '').toLowerCase();
+  const normalized = normalizeBoneToken(name);
+  const leftPatterns = [
+    /(^|[._:\- ])l($|[._:\- ])/,
+    /(^|[._:\- ])left($|[._:\- ])/,
+    /^l(hand|foot|wrist|ankle)/,
+    /(hand|foot|wrist|ankle)l$/,
+  ];
+  const rightPatterns = [
+    /(^|[._:\- ])r($|[._:\- ])/,
+    /(^|[._:\- ])right($|[._:\- ])/,
+    /^r(hand|foot|wrist|ankle)/,
+    /(hand|foot|wrist|ankle)r$/,
+  ];
+  const patterns = side === 'left' ? leftPatterns : rightPatterns;
+  const opposite = side === 'left' ? rightPatterns : leftPatterns;
+
+  let score = 0;
+  if (raw.includes(side)) score += 45;
+  if (normalized.includes(side)) score += 45;
+  if (patterns.some((re) => re.test(raw) || re.test(normalized))) score += 35;
+  if (opposite.some((re) => re.test(raw) || re.test(normalized))) score -= 120;
+  if (raw.includes(side === 'left' ? '.l' : '.r')) score += 45;
+  if (raw.includes(side === 'left' ? '_l' : '_r')) score += 35;
+  return score;
+}
+
+function scoreLimbBone(name, key) {
+  const raw = String(name || '').toLowerCase();
+  const token = normalizeBoneToken(name);
+  const isHand = key.endsWith('Hand');
+  const side = key.startsWith('left') ? 'left' : 'right';
+
+  let score = boneSideScore(name, side);
+
+  if (isHand) {
+    if (/hand/.test(raw) || /hand/.test(token)) score += 90;
+    if (/wrist/.test(raw) || /wrist/.test(token)) score += 70;
+    if (/palm/.test(raw) || /palm/.test(token)) score += 30;
+    if (/finger|thumb|index|middle|ring|pinky|little/.test(raw)) score -= 120;
+  } else {
+    if (/foot/.test(raw) || /foot/.test(token)) score += 90;
+    if (/ankle/.test(raw) || /ankle/.test(token)) score += 70;
+    if (/toe|ball/.test(raw)) score -= 100;
+  }
+
+  if (/mixamorig/.test(raw)) score += 15;
+  if (/^def[-_:]/i.test(name)) score += 20;
+  if (/^mch[-_:]|^org[-_:]|^ctrl[-_:]/i.test(name)) score -= 30;
+  if (/(hand|foot)_[lr]$/i.test(name)) score += 35;
+  if (/(hand|foot)\.[lr]$/i.test(name)) score += 35;
+  if (/(left|right)(hand|foot)$/i.test(raw.replace(/[^a-z]/g, ''))) score += 35;
+
+  return score;
+}
+
+function detectLimbBone(baseAsset, key) {
+  if (!baseAsset) return '';
+  const names = collectBoneNames(baseAsset.object);
+  let best = '';
+  let bestScore = -Infinity;
+
+  for (const name of names) {
+    const score = scoreLimbBone(name, key);
+    if (score > bestScore) {
+      bestScore = score;
+      best = name;
+    }
+  }
+
+  return bestScore >= 70 ? best : '';
+}
+
+function resolveLimbBoneName(edit, baseAsset, key) {
+  const limb = ensureLimbOffsets(edit)[key];
+  if (!limb) return '';
+  if (limb.bone && limb.bone !== 'auto') return limb.bone;
+  return detectLimbBone(baseAsset, key);
+}
+
+function getLimbQuaternion(limb) {
+  return normalizedStoredQuaternion(limb?.quaternion);
+}
+
+function storeLimbQuaternion(limb, quaternion) {
+  const q = quaternion.clone().normalize();
+  limb.quaternion = { x: q.x, y: q.y, z: q.z, w: q.w };
+  return q;
 }
 
 function collectBoneNames(object) {
@@ -453,6 +595,119 @@ function applyArmSpace(clip, value) {
   }
 }
 
+function findTrackByNodeAndProperty(clip, nodeName, propertyName) {
+  return clip.tracks.find((track) => {
+    try {
+      const parsed = THREE.PropertyBinding.parseTrackName(track.name);
+      return parsed.nodeName === nodeName && parsed.propertyName === propertyName;
+    } catch {
+      return false;
+    }
+  }) || null;
+}
+
+function applySingleLimbOffset(clip, edit, baseAsset, key) {
+  const limb = ensureLimbOffsets(edit)[key];
+  const boneName = resolveLimbBoneName(edit, baseAsset, key);
+  if (!limb || !boneName) return;
+
+  const rest = baseAsset?.restPose?.get(boneName);
+  if (!rest) return;
+
+  const px = Number(limb.position?.x) || 0;
+  const py = Number(limb.position?.y) || 0;
+  const pz = Number(limb.position?.z) || 0;
+  const rotationOffsetWorld = getLimbQuaternion(limb);
+
+  const hasPosition = Math.abs(px) + Math.abs(py) + Math.abs(pz) > 1e-9;
+  const hasRotation = rotationOffsetWorld.angleTo(new THREE.Quaternion()) > 1e-8;
+  if (!hasPosition && !hasRotation) return;
+
+  const parentWorld = (rest.parentWorldQuaternion || new THREE.Quaternion()).clone().normalize();
+  const parentWorldInv = parentWorld.clone().invert();
+
+  if (hasPosition) {
+    const worldDelta = new THREE.Vector3(px, py, pz);
+    const localDelta = worldDelta.clone().applyQuaternion(parentWorldInv);
+
+    let track = findTrackByNodeAndProperty(clip, boneName, 'position');
+    if (!track) {
+      const duration = Math.max(clip.duration || 0, 1 / 30);
+      track = new THREE.VectorKeyframeTrack(
+        boneName + '.position',
+        [0, duration],
+        [
+          rest.position.x, rest.position.y, rest.position.z,
+          rest.position.x, rest.position.y, rest.position.z,
+        ]
+      );
+      clip.tracks.push(track);
+    }
+
+    const v = new THREE.Vector3();
+    for (let i = 0; i < track.values.length; i += 3) {
+      v.set(track.values[i], track.values[i + 1], track.values[i + 2]);
+      const originalLength = v.length();
+      v.add(localDelta);
+
+      if (!limb.allowStretch && originalLength > 1e-8 && v.lengthSq() > 1e-12) {
+        v.setLength(originalLength);
+      }
+
+      track.values[i] = v.x;
+      track.values[i + 1] = v.y;
+      track.values[i + 2] = v.z;
+    }
+  }
+
+  if (hasRotation) {
+    const localOffset = parentWorldInv
+      .clone()
+      .multiply(rotationOffsetWorld)
+      .multiply(parentWorld)
+      .normalize();
+
+    let track = findTrackByNodeAndProperty(clip, boneName, 'quaternion');
+    if (!track) {
+      const duration = Math.max(clip.duration || 0, 1 / 30);
+      const qRest = rest.quaternion.clone().normalize();
+      track = new THREE.QuaternionKeyframeTrack(
+        boneName + '.quaternion',
+        [0, duration],
+        [
+          qRest.x, qRest.y, qRest.z, qRest.w,
+          qRest.x, qRest.y, qRest.z, qRest.w,
+        ]
+      );
+      clip.tracks.push(track);
+    }
+
+    const q = new THREE.Quaternion();
+    for (let i = 0; i < track.values.length; i += 4) {
+      q.set(
+        track.values[i],
+        track.values[i + 1],
+        track.values[i + 2],
+        track.values[i + 3]
+      ).normalize();
+
+      q.premultiply(localOffset).normalize();
+
+      track.values[i] = q.x;
+      track.values[i + 1] = q.y;
+      track.values[i + 2] = q.z;
+      track.values[i + 3] = q.w;
+    }
+  }
+}
+
+function applyLimbOffsets(clip, record, baseAsset) {
+  const edit = ensureActionEdit(record);
+  for (const key of LIMB_KEYS) {
+    applySingleLimbOffset(clip, edit, baseAsset, key);
+  }
+}
+
 function applyActionTransformTracks(clip, record) {
   const edit = ensureActionEdit(record);
   const offset = edit.rootOffset || { x: 0, y: 0, z: 0 };
@@ -549,6 +804,7 @@ function applyActionEditPipeline(clip, record, baseAsset) {
   if (edit.mirror) mirrorAnimationClip(clip);
   applyOverdrive(clip, edit.overdrive);
   applyArmSpace(clip, edit.armSpace);
+  applyLimbOffsets(clip, record, baseAsset);
   applyActionTransformTracks(clip, record);
   trimClipByPercent(clip, edit.trimStart, edit.trimEnd);
 
@@ -1114,6 +1370,62 @@ function updateRootGizmoPosition() {
   rootGizmoProxy.updateMatrixWorld(true);
 }
 
+function limbDisplayName(key) {
+  return {
+    leftHand: 'Mano L',
+    rightHand: 'Mano R',
+    leftFoot: 'Pie L',
+    rightFoot: 'Pie R',
+  }[key] || key;
+}
+
+function limbQuaternionToEuler(limb) {
+  const e = new THREE.Euler().setFromQuaternion(getLimbQuaternion(limb), 'XYZ');
+  return {
+    x: THREE.MathUtils.radToDeg(e.x),
+    y: THREE.MathUtils.radToDeg(e.y),
+    z: THREE.MathUtils.radToDeg(e.z),
+  };
+}
+
+function renderLimbEditor(edit, base) {
+  const key = state.activeLimbKey || 'leftHand';
+  const limb = ensureLimbOffsets(edit)[key];
+  const resolved = resolveLimbBoneName(edit, base, key);
+  const boneNames = collectBoneNames(base?.object);
+
+  els.limbSlotSelect.value = key;
+  els.limbBoneSelect.innerHTML =
+    '<option value="auto">Auto-detectar</option>' +
+    boneNames
+      .slice()
+      .sort((a, b) => actionNameCollator.compare(a, b))
+      .map((name) => '<option value="' +
+        name.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;') +
+        '">' + name.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</option>')
+      .join('');
+
+  els.limbBoneSelect.value =
+    limb.bone === 'auto' || boneNames.includes(limb.bone)
+      ? limb.bone
+      : 'auto';
+
+  els.limbDetectedLabel.textContent = resolved
+    ? (limb.bone === 'auto' ? 'Auto → ' + resolved : 'Manual → ' + resolved)
+    : 'No detectado · selecciona manualmente';
+
+  els.limbAllowStretch.checked = Boolean(limb.allowStretch);
+
+  els.limbOffsetX.value = String(cleanLiveNumber(limb.position.x, 4));
+  els.limbOffsetY.value = String(cleanLiveNumber(limb.position.y, 4));
+  els.limbOffsetZ.value = String(cleanLiveNumber(limb.position.z, 4));
+
+  const e = limbQuaternionToEuler(limb);
+  els.limbRotationX.value = String(cleanLiveNumber(e.x, 2));
+  els.limbRotationY.value = String(cleanLiveNumber(e.y, 2));
+  els.limbRotationZ.value = String(cleanLiveNumber(e.z, 2));
+}
+
 function updateTrimVisuals(edit, record) {
   const start = Number(edit.trimStart) || 0;
   const end = Number(edit.trimEnd) || 100;
@@ -1162,6 +1474,7 @@ function renderMotionPanel() {
 
   updateRootOffsetFields(edit);
   configureRootCombinedGizmoUi();
+  renderLimbEditor(edit, base);
 }
 
 function selectActionForEditing(recordId, { openPanel = true } = {}) {
@@ -2559,6 +2872,76 @@ els.mirrorActionCheckbox.addEventListener('change', () => {
   if (!record) return;
   ensureActionEdit(record).mirror = els.mirrorActionCheckbox.checked;
   refreshActivePreview();
+});
+
+els.limbSlotSelect.addEventListener('change', () => {
+  state.activeLimbKey = els.limbSlotSelect.value;
+  const record = getActiveRecord();
+  const base = getBaseAsset();
+  if (record && base) renderLimbEditor(ensureActionEdit(record), base);
+});
+
+els.limbBoneSelect.addEventListener('change', () => {
+  const record = getActiveRecord();
+  const base = getBaseAsset();
+  if (!record || !base) return;
+  const edit = ensureActionEdit(record);
+  ensureLimbOffsets(edit)[state.activeLimbKey].bone = els.limbBoneSelect.value;
+  renderLimbEditor(edit, base);
+  refreshActivePreview();
+});
+
+els.limbAllowStretch.addEventListener('change', () => {
+  const record = getActiveRecord();
+  if (!record) return;
+  const edit = ensureActionEdit(record);
+  ensureLimbOffsets(edit)[state.activeLimbKey].allowStretch = els.limbAllowStretch.checked;
+  refreshActivePreview();
+});
+
+function syncLimbPosition() {
+  const record = getActiveRecord();
+  if (!record) return;
+  const limb = ensureLimbOffsets(ensureActionEdit(record))[state.activeLimbKey];
+  limb.position.x = Number(els.limbOffsetX.value) || 0;
+  limb.position.y = Number(els.limbOffsetY.value) || 0;
+  limb.position.z = Number(els.limbOffsetZ.value) || 0;
+  refreshActivePreview();
+}
+
+els.limbOffsetX.addEventListener('input', syncLimbPosition);
+els.limbOffsetY.addEventListener('input', syncLimbPosition);
+els.limbOffsetZ.addEventListener('input', syncLimbPosition);
+
+function syncLimbRotation() {
+  const record = getActiveRecord();
+  if (!record) return;
+  const limb = ensureLimbOffsets(ensureActionEdit(record))[state.activeLimbKey];
+  const q = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(
+      THREE.MathUtils.degToRad(Number(els.limbRotationX.value) || 0),
+      THREE.MathUtils.degToRad(Number(els.limbRotationY.value) || 0),
+      THREE.MathUtils.degToRad(Number(els.limbRotationZ.value) || 0),
+      'XYZ'
+    )
+  ).normalize();
+  storeLimbQuaternion(limb, q);
+  refreshActivePreview();
+}
+
+els.limbRotationX.addEventListener('input', syncLimbRotation);
+els.limbRotationY.addEventListener('input', syncLimbRotation);
+els.limbRotationZ.addEventListener('input', syncLimbRotation);
+
+els.resetLimbOffsetBtn.addEventListener('click', () => {
+  const record = getActiveRecord();
+  const base = getBaseAsset();
+  if (!record || !base) return;
+  const edit = ensureActionEdit(record);
+  edit.limbOffsets[state.activeLimbKey] = defaultLimbOffset();
+  renderLimbEditor(edit, base);
+  refreshActivePreview();
+  setStatus(limbDisplayName(state.activeLimbKey) + ' restablecida.', 'ok');
 });
 
 function syncRootOffset() {
