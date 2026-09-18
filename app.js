@@ -17,8 +17,8 @@ import {
   countValidPairs as countValidRetargetPairs,
   sortPairsStandard as sortRetargetPairsStandard,
   buildRetargetClip,
-} from './retargeting.js?v=20260918-43';
-import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-43';
+} from './retargeting.js?v=20260918-44';
+import { RestPoseEditor } from './rest-pose-editor.js?v=20260918-44';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -1459,9 +1459,14 @@ function applyRestPose(object, restPose) {
 function restoreAssetImportedRest(asset, object = asset?.object) {
   if (!asset || !object) return false;
 
-  // First restore the exact hierarchy captured immediately after FBX import.
-  // This includes non-deform controls / structural nodes and does not depend
-  // on unique names.
+  // The authoritative animation baseline is the EXACT hierarchy that
+  // FBXLoader produced at import time. Existing clips in the FBX were authored
+  // against these local transforms.
+  //
+  // Do NOT call Skeleton.pose() here. On exported control rigs (CloudRig,
+  // Rigify, ARP, etc.) the skin inverse-bind matrices may describe a different
+  // mesh bind space than the control/animation rest hierarchy. Rebuilding from
+  // bone inverses was the cause of the "old actions become tiny" regression.
   const snapshot = asset.restHierarchy;
   const nodes = [];
   object.traverse((node) => nodes.push(node));
@@ -1484,35 +1489,16 @@ function restoreAssetImportedRest(asset, object = asset?.object) {
 
     restoredExact = true;
   } else if (asset.restPose) {
-    // Fallback for any hierarchy mismatch.
     applyRestPose(object, asset.restPose);
-  }
-
-  // Then reconstruct the actual bind/rest pose of every skinned skeleton.
-  // This is the crucial isolation step: no Action previously played on the
-  // Target is allowed to survive into a new retarget Action.
-  const skeletons = new Set();
-
-  object.traverse((node) => {
-    if (node.isSkinnedMesh && node.skeleton) {
-      skeletons.add(node.skeleton);
-    }
-  });
-
-  for (const skeleton of skeletons) {
-    try {
-      skeleton.pose();
-    } catch {
-      // Keep the hierarchy snapshot fallback if a malformed skeleton cannot
-      // reconstruct from bone inverses.
-    }
   }
 
   object.updateMatrixWorld(true);
 
-  for (const skeleton of skeletons) {
-    skeleton.update();
-  }
+  object.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      node.skeleton.update();
+    }
+  });
 
   return restoredExact || Boolean(asset.restPose);
 }
@@ -5690,6 +5676,9 @@ async function applyCurrentRetargeting() {
       headSource: els.retargetHeadSource.value.trim(),
       headTarget: els.retargetHeadTarget.value.trim(),
       clipName: outputName,
+      autoBakeIk: els.retargetAutoBakeIk.checked,
+      ikChains: state.retargetIkChains.map((row) => ({ ...row })),
+      customIkSources: { ...state.retargetCustomIkSources },
       onProgress: (progress, frame, total) => {
         setRetargetProgress(
           progress,
@@ -5743,6 +5732,8 @@ async function applyCurrentRetargeting() {
           result.report.influentialTargetBoneCount || 0,
         restBaselineBoneCount:
           result.report.restBaselineBoneCount || 0,
+        ikBakedChains: result.report.ikBakedChains || 0,
+        ikSkippedChains: result.report.ikSkippedChains || [],
       },
     };
 
@@ -5801,6 +5792,13 @@ async function applyCurrentRetargeting() {
       ? ' · Rest limpio fijado en ' + baselineCount + ' huesos'
       : '';
 
+    const ikBakedChains =
+      result.report.ikBakedChains || 0;
+
+    const ikNote2 = els.retargetAutoBakeIk.checked
+      ? ' · FK→IK ' + ikBakedChains + '/4 cadenas'
+      : '';
+
     setRetargetProgress(
       1,
       'Listo · ' +
@@ -5812,6 +5810,7 @@ async function applyCurrentRetargeting() {
         ' samples' +
         deformNote +
         baselineNote +
+        ikNote2 +
         ikNote
     );
 
