@@ -5811,9 +5811,18 @@ async function applyCurrentRetargeting() {
       empty: false,
       include: true,
       edit: (() => {
-        // Brand-new Target Action: no inherited whole-rig offset/rotation,
-        // no previous Target Action state, no Source Action Transform.
-        return defaultActionEdit();
+        // Brand-new Target Action: no previous Target Action state.
+        // The only whole-rig transform carried into the new Action is the
+        // Target armature alignment computed by the retarget bake itself.
+        const outputEdit = defaultActionEdit();
+
+        const targetAlignment = normalizedStoredQuaternion(
+          result.report.targetAlignmentQuaternion
+        );
+
+        storeEditQuaternion(outputEdit, targetAlignment);
+
+        return outputEdit;
       })(),
       retargetInfo: {
         sourceAssetId: sourceAsset.id,
@@ -5842,6 +5851,12 @@ async function applyCurrentRetargeting() {
         generatedTrackCount: result.report.generatedTrackCount || 0,
         generatedRotationTracks: result.report.generatedRotationTracks || 0,
         generatedPositionTracks: result.report.generatedPositionTracks || 0,
+        targetAlignmentQuaternion:
+          result.report.targetAlignmentQuaternion || null,
+        sourceAlignmentQuaternion:
+          result.report.sourceAlignmentQuaternion || null,
+        restBaselineMode:
+          result.report.restBaselineMode || '',
       },
     };
 
@@ -5915,7 +5930,7 @@ async function applyCurrentRetargeting() {
       result.report.restBaselineBoneCount || 0;
 
     const baselineNote = baselineCount
-      ? ' · Rest limpio fijado en ' + baselineCount + ' huesos'
+      ? ' · baseline limpio ' + baselineCount + ' huesos'
       : '';
 
     const ikBakedChains =
@@ -5939,7 +5954,6 @@ async function applyCurrentRetargeting() {
         fkNote +
         trackNote +
         deformNote +
-        ' · Rest FBX importado' +
         baselineNote +
         ikNote2
     );
