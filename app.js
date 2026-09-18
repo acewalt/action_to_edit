@@ -65,9 +65,8 @@ const els = {
   rootRotationZ: $('#rootRotationZ'),
   resetRootOffsetBtn: $('#resetRootOffsetBtn'),
   toggleRootGizmoBtn: $('#toggleRootGizmoBtn'),
-  rotateRootGizmoBtn: $('#rotateRootGizmoBtn'),
-  rootGizmoSnap: $('#rootGizmoSnap'),
-  rootGizmoPrecisionLabel: $('#rootGizmoPrecisionLabel'),
+  rootMoveSnapSelect: $('#rootMoveSnapSelect'),
+  rootRotateSnapSelect: $('#rootRotateSnapSelect'),
   rootGizmoHelp: $('#rootGizmoHelp'),
   toggleSkeletonBtn: $('#toggleSkeletonBtn'),
   fitCameraBtn: $('#fitCameraBtn'),
@@ -103,7 +102,6 @@ const state = {
   blenderNavDrag: null,
   motionPanelOpen: true,
   rootGizmoEnabled: false,
-  rootGizmoMode: 'translate',
   rootMoveSnap: 0.5,
   rootRotateSnap: 5,
   rootGizmoDragging: false,
@@ -160,10 +158,20 @@ scene.add(rootGizmoProxy);
 const rootTransformControls = new TransformControls(camera, renderer.domElement);
 rootTransformControls.mode = 'translate';
 rootTransformControls.space = 'world';
-rootTransformControls.size = 0.78;
+rootTransformControls.size = 0.72;
 rootTransformControls.enabled = false;
 scene.add(rootTransformControls.getHelper());
 rootTransformControls.getHelper().visible = false;
+
+// A second TransformControls shares the exact same proxy so translation arrows
+// and rotation rings are visible at the same time. Rotation stays WORLD/GLOBAL.
+const rootRotateControls = new TransformControls(camera, renderer.domElement);
+rootRotateControls.mode = 'rotate';
+rootRotateControls.space = 'world';
+rootRotateControls.size = 0.92;
+rootRotateControls.enabled = false;
+scene.add(rootRotateControls.getHelper());
+rootRotateControls.getHelper().visible = false;
 
 const hemi = new THREE.HemisphereLight(0xffffff, 0x20252b, 2.0);
 scene.add(hemi);
@@ -431,7 +439,10 @@ function applyRootRotation(clip, record, baseAsset) {
   const targetName = resolveRootTarget(record, baseAsset);
   if (!targetName) return;
 
-  const offsetQuaternion = new THREE.Quaternion().setFromEuler(
+  // The stored X/Y/Z values are WORLD/GLOBAL rotations. Bone quaternion
+  // keyframes are local to their parent, so convert the world-space offset
+  // into the target's parent space before applying it.
+  const worldOffset = new THREE.Quaternion().setFromEuler(
     new THREE.Euler(
       THREE.MathUtils.degToRad(rx),
       THREE.MathUtils.degToRad(ry),
@@ -439,6 +450,15 @@ function applyRootRotation(clip, record, baseAsset) {
       'XYZ'
     )
   );
+
+  const rest = baseAsset?.restPose?.get(targetName);
+  const parentWorld = rest?.parentWorldQuaternion?.clone() || new THREE.Quaternion();
+  const localOffset = parentWorld
+    .clone()
+    .invert()
+    .multiply(worldOffset)
+    .multiply(parentWorld)
+    .normalize();
 
   let quaternionTrack = null;
 
@@ -467,7 +487,8 @@ function applyRootRotation(clip, record, baseAsset) {
         quaternionTrack.values[i + 3]
       ).normalize();
 
-      q.multiply(offsetQuaternion).normalize();
+      // Premultiply = rotate around the converted GLOBAL axes.
+      q.premultiply(localOffset).normalize();
 
       quaternionTrack.values[i] = q.x;
       quaternionTrack.values[i + 1] = q.y;
@@ -477,10 +498,9 @@ function applyRootRotation(clip, record, baseAsset) {
     return;
   }
 
-  const rest = baseAsset?.restPose?.get(targetName);
   if (!rest) return;
 
-  q.copy(rest.quaternion).multiply(offsetQuaternion).normalize();
+  q.copy(rest.quaternion).premultiply(localOffset).normalize();
 
   const duration = Math.max(clip.duration || 0, 1 / 30);
   clip.tracks.push(new THREE.QuaternionKeyframeTrack(
@@ -997,70 +1017,37 @@ function updateRootOffsetFields(edit, { live = false } = {}) {
   els.rootRotationZ.value = String(cleanLiveNumber(edit.rootRotation?.z, rotDecimals));
 }
 
-function configureRootGizmoModeUi() {
-  const rotate = state.rootGizmoMode === 'rotate';
-
-  els.toggleRootGizmoBtn.classList.toggle(
-    'active',
-    state.rootGizmoEnabled && !rotate
-  );
-  els.rotateRootGizmoBtn.classList.toggle(
-    'active',
-    state.rootGizmoEnabled && rotate
-  );
-
+function configureRootCombinedGizmoUi() {
+  els.toggleRootGizmoBtn.classList.toggle('active', state.rootGizmoEnabled);
   els.toggleRootGizmoBtn.textContent =
-    state.rootGizmoEnabled && !rotate ? 'Mover activo' : 'Mover';
-  els.rotateRootGizmoBtn.textContent =
-    state.rootGizmoEnabled && rotate ? 'Rotar activo' : 'Rotar';
+    state.rootGizmoEnabled ? 'Transformación activa' : 'Transformar en viewport';
 
-  els.rootGizmoPrecisionLabel.textContent = rotate
-    ? 'Snap °'
-    : 'Precisión';
+  els.rootMoveSnapSelect.value = String(state.rootMoveSnap);
+  els.rootRotateSnapSelect.value = String(state.rootRotateSnap);
 
-  const values = rotate
-    ? [
-        ['1', '1°'],
-        ['5', '5°'],
-        ['10', '10°'],
-        ['15', '15°'],
-      ]
-    : [
-        ['0.1', '0.1'],
-        ['0.25', '0.25'],
-        ['0.5', '0.5'],
-        ['1', '1.0'],
-      ];
+  els.rootGizmoHelp.textContent =
+    'Flechas = mover · aros = rotar en ejes globales. El arrastre es continuo; la precisión se aplica al soltar.';
 
-  const selected = rotate
-    ? String(state.rootRotateSnap)
-    : String(state.rootMoveSnap);
+  rootTransformControls.setMode('translate');
+  rootTransformControls.setSpace('world');
+  rootRotateControls.setMode('rotate');
+  rootRotateControls.setSpace('world');
 
-  els.rootGizmoSnap.innerHTML = values
-    .map(([value, label]) =>
-      '<option value="' + value + '">' + label + '</option>'
-    )
-    .join('');
-
-  els.rootGizmoSnap.value = selected;
-
-  els.rootGizmoHelp.textContent = rotate
-    ? 'Rotar: respuesta continua en tiempo real. Al soltar se redondea al snap angular elegido.'
-    : 'Mover: respuesta continua en tiempo real. Al soltar se redondea a la precisión elegida.';
-
-  rootTransformControls.setMode(rotate ? 'rotate' : 'translate');
-  rootTransformControls.setSpace(rotate ? 'local' : 'world');
-
-  // Dragging must remain continuous. Precision/snap is applied only when the
-  // pointer is released, so the character follows the mouse in real time.
+  // Continuous while dragging; exact values are rounded only on mouse release.
   rootTransformControls.setTranslationSnap(null);
-  rootTransformControls.setRotationSnap(null);
+  rootRotateControls.setRotationSnap(null);
 }
 
 function hideRootGizmo() {
   rootTransformControls.detach();
+  rootRotateControls.detach();
+
   rootTransformControls.enabled = false;
+  rootRotateControls.enabled = false;
+
   rootTransformControls.getHelper().visible = false;
+  rootRotateControls.getHelper().visible = false;
+
   els.toggleRootGizmoBtn?.classList.remove('active');
 }
 
@@ -1085,24 +1072,23 @@ function updateRootGizmoAttachment() {
 
   target.updateWorldMatrix(true, false);
   target.getWorldPosition(rootGizmoProxy.position);
-
-  if (state.rootGizmoMode === 'rotate') {
-    target.getWorldQuaternion(rootGizmoProxy.quaternion);
-  } else {
-    rootGizmoProxy.quaternion.identity();
-  }
-
+  target.getWorldQuaternion(rootGizmoProxy.quaternion);
   rootGizmoProxy.scale.set(1, 1, 1);
   rootGizmoProxy.updateMatrixWorld(true);
 
-  configureRootGizmoModeUi();
+  configureRootCombinedGizmoUi();
 
   if (rootTransformControls.object !== rootGizmoProxy) {
     rootTransformControls.attach(rootGizmoProxy);
   }
+  if (rootRotateControls.object !== rootGizmoProxy) {
+    rootRotateControls.attach(rootGizmoProxy);
+  }
 
   rootTransformControls.enabled = true;
+  rootRotateControls.enabled = true;
   rootTransformControls.getHelper().visible = true;
+  rootRotateControls.getHelper().visible = true;
 }
 
 function updateRootGizmoPosition() {
@@ -1116,11 +1102,7 @@ function updateRootGizmoPosition() {
 
   target.updateWorldMatrix(true, false);
   target.getWorldPosition(rootGizmoProxy.position);
-
-  if (state.rootGizmoMode === 'rotate') {
-    target.getWorldQuaternion(rootGizmoProxy.quaternion);
-  }
-
+  target.getWorldQuaternion(rootGizmoProxy.quaternion);
   rootGizmoProxy.updateMatrixWorld(true);
 }
 
@@ -1193,7 +1175,7 @@ function renderMotionPanel() {
         : edit.rootTarget;
 
   updateRootOffsetFields(edit);
-  configureRootGizmoModeUi();
+  configureRootCombinedGizmoUi();
 }
 
 function selectActionForEditing(recordId, { openPanel = true } = {}) {
@@ -1791,6 +1773,7 @@ function setActiveCamera(mode, { preserveView = true } = {}) {
   controls.target.copy(target);
 
   rootTransformControls.camera = camera;
+  rootRotateControls.camera = camera;
 
   flushOrbitControls();
 
@@ -2331,7 +2314,6 @@ function clearAll() {
   state.activeClipId = null;
   state.skeletonHelper = null;
   state.rootGizmoEnabled = false;
-  state.rootGizmoMode = 'translate';
   state.rootGizmoDragging = false;
   state.rootGizmoDrag = null;
   state.axisViewActive = false;
@@ -2543,7 +2525,7 @@ els.resetMotionPanelBtn.addEventListener('click', () => {
   refreshActivePreview();
 });
 
-function setRootGizmoMode(mode) {
+function toggleCombinedRootGizmo() {
   const record = getActiveRecord();
   const base = getBaseAsset();
 
@@ -2552,54 +2534,41 @@ function setRootGizmoMode(mode) {
     return;
   }
 
-  const nextMode = mode === 'rotate' ? 'rotate' : 'translate';
-
-  if (state.rootGizmoEnabled && state.rootGizmoMode === nextMode) {
-    state.rootGizmoEnabled = false;
-  } else {
-    state.rootGizmoEnabled = true;
-    state.rootGizmoMode = nextMode;
-  }
-
-  configureRootGizmoModeUi();
+  state.rootGizmoEnabled = !state.rootGizmoEnabled;
+  configureRootCombinedGizmoUi();
   updateRootGizmoAttachment();
 
-  if (!state.rootGizmoEnabled) {
-    setStatus('Gizmo de transformación desactivado.', 'info');
-  } else if (nextMode === 'rotate') {
-    setStatus('Rotación activa. Arrastra los aros X, Y o Z.', 'info');
-  } else {
-    setStatus('Traslación activa. Arrastra los ejes X, Y o Z.', 'info');
-  }
+  setStatus(
+    state.rootGizmoEnabled
+      ? 'Gizmo combinado activo: flechas para mover y aros para rotar globalmente.'
+      : 'Gizmo de transformación desactivado.',
+    'info'
+  );
 }
 
-els.toggleRootGizmoBtn.addEventListener('click', () => {
-  setRootGizmoMode('translate');
+els.toggleRootGizmoBtn.addEventListener('click', toggleCombinedRootGizmo);
+
+els.rootMoveSnapSelect.addEventListener('change', () => {
+  const value = Number(els.rootMoveSnapSelect.value);
+  state.rootMoveSnap = Number.isFinite(value) ? value : 0.5;
+  setStatus(
+    'Ajuste final de movimiento: ' + state.rootMoveSnap + ' unidades FBX.',
+    'info'
+  );
 });
 
-els.rotateRootGizmoBtn.addEventListener('click', () => {
-  setRootGizmoMode('rotate');
+els.rootRotateSnapSelect.addEventListener('change', () => {
+  const value = Number(els.rootRotateSnapSelect.value);
+  state.rootRotateSnap = Number.isFinite(value) ? value : 5;
+  setStatus(
+    'Ajuste final de rotación global: ' + state.rootRotateSnap + '°.',
+    'info'
+  );
 });
 
-els.rootGizmoSnap.addEventListener('change', () => {
-  const value = Number(els.rootGizmoSnap.value);
+function beginRootGizmoDrag(mode) {
+  if (state.rootGizmoDragging) return;
 
-  if (state.rootGizmoMode === 'rotate') {
-    state.rootRotateSnap = Number.isFinite(value) ? value : 5;
-    setStatus(
-      'Ajuste final de rotación: ' + state.rootRotateSnap + '° · el arrastre sigue siendo continuo.',
-      'info'
-    );
-  } else {
-    state.rootMoveSnap = Number.isFinite(value) ? value : 0.5;
-    setStatus(
-      'Ajuste final de movimiento: ' + state.rootMoveSnap + ' unidades FBX · el arrastre sigue siendo continuo.',
-      'info'
-    );
-  }
-});
-
-rootTransformControls.addEventListener('mouseDown', () => {
   const record = getActiveRecord();
   const base = getBaseAsset();
   const target = findRootTargetObject(record, base);
@@ -2608,24 +2577,28 @@ rootTransformControls.addEventListener('mouseDown', () => {
   controls.enabled = false;
   state.rootGizmoDragging = true;
 
-  // Keep manipulation fully continuous while the pointer is down.
   rootTransformControls.setTranslationSnap(null);
-  rootTransformControls.setRotationSnap(null);
+  rootRotateControls.setRotationSnap(null);
 
   const edit = ensureActionEdit(record);
   const startWorld = new THREE.Vector3();
   const startProxyQuaternion = new THREE.Quaternion();
+  const parentWorldQuaternion = new THREE.Quaternion();
 
   rootGizmoProxy.getWorldPosition(startWorld);
   rootGizmoProxy.getWorldQuaternion(startProxyQuaternion);
 
   target.updateWorldMatrix(true, false);
+  if (target.parent) {
+    target.parent.getWorldQuaternion(parentWorldQuaternion);
+  }
 
   state.rootGizmoDrag = {
     recordId: record.id,
-    mode: state.rootGizmoMode,
+    mode,
     target,
     parent: target.parent || null,
+    parentWorldQuaternion,
     startWorld,
     startProxyQuaternion,
     startTargetLocal: target.position.clone(),
@@ -2645,15 +2618,16 @@ rootTransformControls.addEventListener('mouseDown', () => {
   };
 
   if (state.currentAction) state.currentAction.paused = true;
-});
+}
 
-rootTransformControls.addEventListener('objectChange', () => {
+function updateRootTranslateDrag() {
   const drag = state.rootGizmoDrag;
   const record = getActiveRecord();
 
   if (
     !state.rootGizmoDragging ||
     !drag ||
+    drag.mode !== 'translate' ||
     !record ||
     record.id !== drag.recordId
   ) {
@@ -2661,51 +2635,6 @@ rootTransformControls.addEventListener('objectChange', () => {
   }
 
   const edit = ensureActionEdit(record);
-
-  if (drag.mode === 'rotate') {
-    const currentProxyQuaternion = rootGizmoProxy.quaternion.clone().normalize();
-
-    const deltaQuaternion = drag.startProxyQuaternion
-      .clone()
-      .invert()
-      .multiply(currentProxyQuaternion)
-      .normalize();
-
-    const deltaEuler = new THREE.Euler().setFromQuaternion(
-      deltaQuaternion,
-      'XYZ'
-    );
-
-    const nextX =
-      drag.startRotation.x + THREE.MathUtils.radToDeg(deltaEuler.x);
-    const nextY =
-      drag.startRotation.y + THREE.MathUtils.radToDeg(deltaEuler.y);
-    const nextZ =
-      drag.startRotation.z + THREE.MathUtils.radToDeg(deltaEuler.z);
-
-    edit.rootRotation.x = nextX;
-    edit.rootRotation.y = nextY;
-    edit.rootRotation.z = nextZ;
-    updateRootOffsetFields(edit, { live: true });
-
-    const appliedDelta = new THREE.Quaternion().setFromEuler(
-      new THREE.Euler(
-        THREE.MathUtils.degToRad(nextX - drag.startRotation.x),
-        THREE.MathUtils.degToRad(nextY - drag.startRotation.y),
-        THREE.MathUtils.degToRad(nextZ - drag.startRotation.z),
-        'XYZ'
-      )
-    );
-
-    drag.target.quaternion
-      .copy(drag.startTargetQuaternion)
-      .multiply(appliedDelta)
-      .normalize();
-
-    drag.target.updateMatrixWorld(true);
-    return;
-  }
-
   const currentWorld = new THREE.Vector3();
   rootGizmoProxy.getWorldPosition(currentWorld);
 
@@ -2729,33 +2658,77 @@ rootTransformControls.addEventListener('objectChange', () => {
   edit.rootOffset.z = nextZ;
   updateRootOffsetFields(edit, { live: true });
 
-  const liveDelta = new THREE.Vector3(
-    nextX - drag.startOffset.x,
-    nextY - drag.startOffset.y,
-    nextZ - drag.startOffset.z
-  );
-
-  drag.target.position.copy(drag.startTargetLocal).add(liveDelta);
+  drag.target.position.copy(drag.startTargetLocal).add(deltaLocal);
   drag.target.updateMatrixWorld(true);
-});
+}
 
-rootTransformControls.addEventListener('mouseUp', () => {
+function updateRootRotateDrag() {
   const drag = state.rootGizmoDrag;
+  const record = getActiveRecord();
+
+  if (
+    !state.rootGizmoDragging ||
+    !drag ||
+    drag.mode !== 'rotate' ||
+    !record ||
+    record.id !== drag.recordId
+  ) {
+    return;
+  }
+
+  const edit = ensureActionEdit(record);
+  const currentProxyQuaternion = new THREE.Quaternion();
+  rootGizmoProxy.getWorldQuaternion(currentProxyQuaternion);
+
+  // WORLD delta: currentWorld = deltaWorld * startWorld
+  const deltaWorld = currentProxyQuaternion
+    .clone()
+    .multiply(drag.startProxyQuaternion.clone().invert())
+    .normalize();
+
+  const deltaEuler = new THREE.Euler().setFromQuaternion(deltaWorld, 'XYZ');
+
+  edit.rootRotation.x =
+    drag.startRotation.x + THREE.MathUtils.radToDeg(deltaEuler.x);
+  edit.rootRotation.y =
+    drag.startRotation.y + THREE.MathUtils.radToDeg(deltaEuler.y);
+  edit.rootRotation.z =
+    drag.startRotation.z + THREE.MathUtils.radToDeg(deltaEuler.z);
+
+  updateRootOffsetFields(edit, { live: true });
+
+  // Convert that global/world delta into the animated bone's local parent
+  // space so the live preview matches what gets written to the Action.
+  const parentWorld = drag.parentWorldQuaternion;
+  const localDelta = parentWorld
+    .clone()
+    .invert()
+    .multiply(deltaWorld)
+    .multiply(parentWorld)
+    .normalize();
+
+  drag.target.quaternion
+    .copy(drag.startTargetQuaternion)
+    .premultiply(localDelta)
+    .normalize();
+
+  drag.target.updateMatrixWorld(true);
+}
+
+function finishRootGizmoDrag(mode) {
+  const drag = state.rootGizmoDrag;
+  if (!drag || drag.mode !== mode) return;
+
   controls.enabled = true;
   state.rootGizmoDragging = false;
   state.rootGizmoDrag = null;
-
-  if (!drag) {
-    updateRootGizmoAttachment();
-    return;
-  }
 
   const record = state.clips.find((item) => item.id === drag.recordId);
 
   if (record) {
     const edit = ensureActionEdit(record);
 
-    if (drag.mode === 'rotate') {
+    if (mode === 'rotate') {
       const snap = Math.max(Number(state.rootRotateSnap) || 5, 0.0001);
       edit.rootRotation.x = roundOffsetValue(edit.rootRotation.x, snap);
       edit.rootRotation.y = roundOffsetValue(edit.rootRotation.y, snap);
@@ -2780,11 +2753,13 @@ rootTransformControls.addEventListener('mouseUp', () => {
 
   renderMotionPanel();
   requestAnimationFrame(updateRootGizmoAttachment);
+
+  if (!record) return;
   const savedEdit = ensureActionEdit(record);
 
-  if (drag.mode === 'rotate') {
+  if (mode === 'rotate') {
     setStatus(
-      'Rotación guardada: X ' + savedEdit.rootRotation.x + '° · Y ' +
+      'Rotación global guardada: X ' + savedEdit.rootRotation.x + '° · Y ' +
       savedEdit.rootRotation.y + '° · Z ' + savedEdit.rootRotation.z + '°.',
       'ok'
     );
@@ -2795,6 +2770,22 @@ rootTransformControls.addEventListener('mouseUp', () => {
       'ok'
     );
   }
+}
+
+rootTransformControls.addEventListener('mouseDown', () => {
+  beginRootGizmoDrag('translate');
+});
+rootTransformControls.addEventListener('objectChange', updateRootTranslateDrag);
+rootTransformControls.addEventListener('mouseUp', () => {
+  finishRootGizmoDrag('translate');
+});
+
+rootRotateControls.addEventListener('mouseDown', () => {
+  beginRootGizmoDrag('rotate');
+});
+rootRotateControls.addEventListener('objectChange', updateRootRotateDrag);
+rootRotateControls.addEventListener('mouseUp', () => {
+  finishRootGizmoDrag('rotate');
 });
 
 renderer.domElement.addEventListener('pointerdown', (event) => {
