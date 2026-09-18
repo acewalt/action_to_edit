@@ -917,7 +917,7 @@ export async function buildRetargetClip({
       weightedTargetBoneCount: weightedTargetBones.size,
       influentialTargetBoneCount: influentialTargetBones.size,
       restBaselineBoneCount: 0,
-      restBaselineMode: 'external-bind-pose',
+      restBaselineMode: 'imported-fbx-rest',
       generatedTrackCount: tracks.length,
       generatedRotationTracks: tracks.filter((track) =>
         track.name.endsWith('.quaternion')
@@ -928,6 +928,16 @@ export async function buildRetargetClip({
       transferRootMotion: Boolean(transferRootMotion),
       fkRequestedPairs,
       fkResolvedPairs,
+      fkMappings: runtimePairs
+        .filter((pair) =>
+          /^fk[-_:]/i.test(String(pair.requestedTargetName || '').trim())
+        )
+        .map((pair) => ({
+          source: pair.sourceName,
+          requestedTarget: pair.requestedTargetName,
+          bakedTarget: pair.targetName,
+          redirected: pair.requestedTargetName !== pair.targetName,
+        })),
       ikBakedChains: ikBake.chains.length,
       ikSkippedChains: ikBake.skipped,
     },
@@ -1561,72 +1571,51 @@ function restoreHierarchySnapshot(root, snapshot) {
 function restoreAssetRest(root, asset) {
   if (!root || !asset) return;
 
-  // RETARGET REST != normal Action playback baseline.
-  //
-  // Existing FBX Actions are previewed against the exact hierarchy imported
-  // by FBXLoader (app.js). Retargeting, however, must start from the actual
-  // unanimated bind/rest skeleton — the same state shown by Redefine Rest Pose.
-  //
-  // This separation is intentional:
-  //   normal Action playback -> imported animation hierarchy
-  //   retarget bake          -> true bind/rest pose
-  //
-  // A Blender/CloudRig FBX can be exported while the armature is left in the
-  // last pose of an Action (for example "fail"). If we use that imported pose
-  // as the retarget baseline, every new Action is baked ON TOP of the ending
-  // pose of that Action. That is exactly the failure seen in the viewport.
-  restoreHierarchySnapshot(
+  // BlendCap retargets against the armature's edit/rest hierarchy. On exported
+  // control rigs, inverse skin-bind matrices are not a safe substitute for
+  // that hierarchy: Skeleton.pose() can expose 0.01/100 bind scaling and make
+  // a perfectly valid target explode in size. The exact FBXLoader hierarchy
+  // captured immediately after import is our browser equivalent of the
+  // armature rest state.
+  const restored = restoreHierarchySnapshot(
     root,
     asset.restHierarchy
   );
 
-  forceBindPose(root);
+  if (!restored && asset.restPose) {
+    objectApplyNamedRest(root, asset.restPose);
+  }
 
   root.updateMatrixWorld(true);
-}
-
-function forceBindPose(root) {
-  if (!root) return;
-
-  const skeletons = new Set();
 
   root.traverse((node) => {
     if (node.isSkinnedMesh && node.skeleton) {
-      skeletons.add(node.skeleton);
+      node.skeleton.update();
     }
   });
+}
 
-  for (const skeleton of skeletons) {
-    try {
-      skeleton.pose();
-    } catch {
-      // Keep the restored hierarchy for malformed / incomplete skeletons.
-    }
-  }
+function objectApplyNamedRest(object, restPose) {
+  if (!object || !restPose) return;
 
-  root.updateMatrixWorld(true);
+  object.traverse((node) => {
+    if (!node.isBone || !node.name) return;
+    const rest = restPose.get?.(node.name);
+    if (!rest) return;
 
-  for (const skeleton of skeletons) {
-    skeleton.update();
-  }
+    if (rest.position) node.position.copy(rest.position);
+    if (rest.quaternion) node.quaternion.copy(rest.quaternion).normalize();
+    if (rest.scale) node.scale.copy(rest.scale);
+  });
+
+  object.updateMatrixWorld(true);
 }
 
 function applyRestPose(object, restPose) {
   if (!object) return;
 
-  forceBindPose(object);
-
   if (restPose) {
-    object.traverse((node) => {
-      if (!node.isBone || !node.name) return;
-
-      const rest = restPose.get(node.name);
-      if (!rest) return;
-
-      node.position.copy(rest.position);
-      node.quaternion.copy(rest.quaternion);
-      node.scale.copy(rest.scale);
-    });
+    objectApplyNamedRest(object, restPose);
   }
 
   object.updateMatrixWorld(true);
