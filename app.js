@@ -22,6 +22,15 @@ const els = {
   renameCompatibleActionsBtn: $('#renameCompatibleActionsBtn'),
   viewport: $('#viewport'),
   viewportEmpty: $('#viewportEmpty'),
+  toggleProjectionBtn: $('#toggleProjectionBtn'),
+  viewGizmo: $('#viewGizmo'),
+  viewAxisButtons: [...document.querySelectorAll('[data-axis-view]')],
+  navLineX: $('#navLineX'),
+  navLineY: $('#navLineY'),
+  navLineZ: $('#navLineZ'),
+  navLineXNeg: $('#navLineXNeg'),
+  navLineYNeg: $('#navLineYNeg'),
+  navLineZNeg: $('#navLineZNeg'),
   baseBadge: $('#baseBadge'),
   activeActionBadge: $('#activeActionBadge'),
   playPauseBtn: $('#playPauseBtn'),
@@ -78,6 +87,8 @@ const state = {
   skeletonHelper: null,
   skeletonVisible: false,
   previewStage: null,
+  projectionMode: 'perspective',
+  orthoViewHeight: 4,
   motionPanelOpen: true,
   rootGizmoEnabled: false,
   rootGizmoDragging: false,
@@ -97,8 +108,13 @@ previewStage.name = '__preview_stage__';
 scene.add(previewStage);
 state.previewStage = previewStage;
 
-const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 100000);
-camera.position.set(3, 2.4, 5);
+const perspectiveCamera = new THREE.PerspectiveCamera(42, 1, 0.01, 100000);
+perspectiveCamera.position.set(3, 2.4, 5);
+
+const orthographicCamera = new THREE.OrthographicCamera(-2, 2, 2, -2, 0.01, 100000);
+orthographicCamera.position.copy(perspectiveCamera.position);
+
+let camera = perspectiveCamera;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -1454,6 +1470,143 @@ function playClip(clipId, options = {}) {
   }
 }
 
+function getViewportAspect() {
+  const width = Math.max(els.viewport.clientWidth, 1);
+  const height = Math.max(els.viewport.clientHeight, 1);
+  return width / height;
+}
+
+function syncOrthographicFrustum(viewHeight = state.orthoViewHeight) {
+  const aspect = Math.max(getViewportAspect(), 0.05);
+  state.orthoViewHeight = Math.max(Number(viewHeight) || 4, 0.001);
+  const halfH = state.orthoViewHeight * 0.5;
+  const halfW = halfH * aspect;
+
+  orthographicCamera.left = -halfW;
+  orthographicCamera.right = halfW;
+  orthographicCamera.top = halfH;
+  orthographicCamera.bottom = -halfH;
+  orthographicCamera.updateProjectionMatrix();
+}
+
+function perspectiveVisibleHeightAtTarget() {
+  const distance = Math.max(perspectiveCamera.position.distanceTo(controls.target), 0.001);
+  return 2 * distance * Math.tan(THREE.MathUtils.degToRad(perspectiveCamera.fov) * 0.5);
+}
+
+function setActiveCamera(mode, { preserveView = true } = {}) {
+  const nextMode = mode === 'orthographic' ? 'orthographic' : 'perspective';
+  if (state.projectionMode === nextMode && camera) {
+    els.toggleProjectionBtn.textContent = nextMode === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
+    return;
+  }
+
+  const previous = camera;
+  const previousPosition = previous.position.clone();
+  const previousQuaternion = previous.quaternion.clone();
+  const previousUp = previous.up.clone();
+
+  if (nextMode === 'orthographic') {
+    if (preserveView && previous.isPerspectiveCamera) {
+      state.orthoViewHeight = perspectiveVisibleHeightAtTarget();
+    }
+    syncOrthographicFrustum(state.orthoViewHeight);
+
+    orthographicCamera.position.copy(previousPosition);
+    orthographicCamera.quaternion.copy(previousQuaternion);
+    orthographicCamera.up.copy(previousUp);
+    camera = orthographicCamera;
+  } else {
+    perspectiveCamera.position.copy(previousPosition);
+    perspectiveCamera.quaternion.copy(previousQuaternion);
+    perspectiveCamera.up.copy(previousUp);
+    perspectiveCamera.aspect = getViewportAspect();
+    perspectiveCamera.updateProjectionMatrix();
+    camera = perspectiveCamera;
+  }
+
+  state.projectionMode = nextMode;
+  controls.object = camera;
+  controls.update();
+
+  rootTransformControls.camera = camera;
+  els.toggleProjectionBtn.textContent = nextMode === 'orthographic' ? 'Ortográfica' : 'Perspectiva';
+}
+
+function axisViewDefinition(axisView) {
+  const definitions = {
+    '+x': { direction: new THREE.Vector3(1, 0, 0), up: new THREE.Vector3(0, 1, 0), name: '+X' },
+    '-x': { direction: new THREE.Vector3(-1, 0, 0), up: new THREE.Vector3(0, 1, 0), name: '-X' },
+    '+y': { direction: new THREE.Vector3(0, 1, 0), up: new THREE.Vector3(0, 0, -1), name: '+Y' },
+    '-y': { direction: new THREE.Vector3(0, -1, 0), up: new THREE.Vector3(0, 0, 1), name: '-Y' },
+    '+z': { direction: new THREE.Vector3(0, 0, 1), up: new THREE.Vector3(0, 1, 0), name: '+Z' },
+    '-z': { direction: new THREE.Vector3(0, 0, -1), up: new THREE.Vector3(0, 1, 0), name: '-Z' },
+  };
+  return definitions[axisView] || definitions['+z'];
+}
+
+function switchToAxisView(axisView) {
+  const def = axisViewDefinition(axisView);
+  const target = controls.target.clone();
+
+  let distance = camera.position.distanceTo(target);
+  if (!Number.isFinite(distance) || distance < 0.01) distance = 5;
+
+  if (camera.isPerspectiveCamera) {
+    state.orthoViewHeight = perspectiveVisibleHeightAtTarget();
+  }
+
+  setActiveCamera('orthographic', { preserveView: true });
+
+  camera.position.copy(target).addScaledVector(def.direction, distance);
+  camera.up.copy(def.up);
+  camera.lookAt(target);
+  camera.updateMatrixWorld(true);
+  controls.object = camera;
+  controls.target.copy(target);
+  controls.update();
+
+  setStatus('Vista ortográfica alineada a ' + def.name + '.', 'info');
+}
+
+function updateNavigationGizmo() {
+  if (!els.viewGizmo) return;
+
+  const center = 43;
+  const radius = 27;
+  const inverseCameraQuat = camera.quaternion.clone().invert();
+
+  const axes = [
+    { key: '+x', vector: new THREE.Vector3(1, 0, 0), line: els.navLineX },
+    { key: '-x', vector: new THREE.Vector3(-1, 0, 0), line: els.navLineXNeg },
+    { key: '+y', vector: new THREE.Vector3(0, 1, 0), line: els.navLineY },
+    { key: '-y', vector: new THREE.Vector3(0, -1, 0), line: els.navLineYNeg },
+    { key: '+z', vector: new THREE.Vector3(0, 0, 1), line: els.navLineZ },
+    { key: '-z', vector: new THREE.Vector3(0, 0, -1), line: els.navLineZNeg },
+  ];
+
+  for (const axis of axes) {
+    const viewVector = axis.vector.clone().applyQuaternion(inverseCameraQuat);
+    const x = center + viewVector.x * radius;
+    const y = center - viewVector.y * radius;
+
+    const button = els.viewAxisButtons.find((el) => el.dataset.axisView === axis.key);
+    if (button) {
+      button.style.left = x + 'px';
+      button.style.top = y + 'px';
+      button.style.zIndex = String(30 + Math.round((1 - viewVector.z) * 10));
+      button.style.opacity = String(THREE.MathUtils.clamp(0.45 + (1 - viewVector.z) * 0.4, 0.35, 1));
+    }
+
+    if (axis.line) {
+      axis.line.setAttribute('x1', String(center));
+      axis.line.setAttribute('y1', String(center));
+      axis.line.setAttribute('x2', String(x));
+      axis.line.setAttribute('y2', String(y));
+    }
+  }
+}
+
 function fitCameraToObject(object) {
   previewStage.updateMatrixWorld(true);
   object.updateMatrixWorld(true);
@@ -1464,37 +1617,62 @@ function fitCameraToObject(object) {
     Number.isFinite(box.max.x) && Number.isFinite(box.max.y) && Number.isFinite(box.max.z);
 
   if (box.isEmpty() || !finite) {
-    camera.position.set(0, 1.5, 5);
     controls.target.set(0, 1.5, 0);
-    camera.near = 0.001;
-    camera.far = 1000;
-    camera.updateProjectionMatrix();
+    camera.position.set(0, 1.5, 5);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(controls.target);
+
+    if (camera.isPerspectiveCamera) {
+      camera.near = 0.001;
+      camera.far = 1000;
+      camera.updateProjectionMatrix();
+    } else {
+      state.orthoViewHeight = 4;
+      syncOrthographicFrustum(4);
+    }
+
     controls.update();
     return;
   }
 
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
+  const aspect = Math.max(getViewportAspect(), 0.05);
 
-  const verticalFov = THREE.MathUtils.degToRad(camera.fov);
-  const aspect = Math.max(camera.aspect || 1, 0.05);
-  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
+  let direction = camera.position.clone().sub(controls.target);
+  if (direction.lengthSq() < 1e-8) direction.set(0.32, 0.12, 1);
+  direction.normalize();
 
-  const fitHeight = size.y / (2 * Math.tan(verticalFov / 2));
-  const fitWidth = size.x / (2 * Math.tan(horizontalFov / 2));
-  const fitDepth = size.z * 0.65;
-  const distance = Math.max(fitHeight, fitWidth, 1.5) * 1.28 + fitDepth;
+  if (camera.isPerspectiveCamera) {
+    const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+    const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
+    const fitHeight = size.y / (2 * Math.tan(verticalFov / 2));
+    const fitWidth = size.x / (2 * Math.tan(horizontalFov / 2));
+    const fitDepth = size.z * 0.65;
+    const distance = Math.max(fitHeight, fitWidth, 1.5) * 1.28 + fitDepth;
 
-  // Vista ligeramente en perspectiva, manteniendo el personaje completo dentro del frame.
-  const direction = new THREE.Vector3(0.32, 0.12, 1).normalize();
-  camera.position.copy(center).addScaledVector(direction, distance);
-  camera.near = Math.max(distance / 1000, 0.001);
-  camera.far = Math.max(distance * 100, 1000);
-  camera.updateProjectionMatrix();
+    camera.position.copy(center).addScaledVector(direction, distance);
+    camera.near = Math.max(distance / 1000, 0.001);
+    camera.far = Math.max(distance * 100, 1000);
+    camera.lookAt(center);
+    camera.updateProjectionMatrix();
+
+    controls.minDistance = Math.max(distance * 0.08, 0.05);
+    controls.maxDistance = distance * 12;
+  } else {
+    const requiredHeight = Math.max(size.y, size.x / aspect, 1) * 1.25;
+    state.orthoViewHeight = requiredHeight;
+    syncOrthographicFrustum(requiredHeight);
+
+    const distance = Math.max(size.x, size.y, size.z, 1) * 4;
+    camera.position.copy(center).addScaledVector(direction, distance);
+    camera.lookAt(center);
+    camera.near = 0.001;
+    camera.far = Math.max(distance * 100, 1000);
+    camera.updateProjectionMatrix();
+  }
 
   controls.target.copy(center);
-  controls.minDistance = Math.max(distance * 0.08, 0.05);
-  controls.maxDistance = distance * 12;
   controls.update();
 
   grid.position.y = 0;
@@ -2025,6 +2203,24 @@ rootTransformControls.addEventListener('mouseUp', () => {
     ensureActionEdit(record).rootOffset.z + '.', 'ok');
 });
 
+els.toggleProjectionBtn.addEventListener('click', () => {
+  const next = camera.isPerspectiveCamera ? 'orthographic' : 'perspective';
+  setActiveCamera(next, { preserveView: true });
+  setStatus(
+    next === 'orthographic'
+      ? 'Vista ortográfica activada.'
+      : 'Vista en perspectiva activada.',
+    'info'
+  );
+});
+
+els.viewAxisButtons.forEach((button) => {
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    switchToAxisView(button.dataset.axisView);
+  });
+});
+
 els.fitCameraBtn.addEventListener('click', () => {
   const base = getBaseAsset();
   if (base) {
@@ -2065,8 +2261,10 @@ function resize() {
   const nextAspect = width / height;
 
   renderer.setSize(width, height, false);
-  camera.aspect = nextAspect;
-  camera.updateProjectionMatrix();
+
+  perspectiveCamera.aspect = nextAspect;
+  perspectiveCamera.updateProjectionMatrix();
+  syncOrthographicFrustum(state.orthoViewHeight);
 
   const base = getBaseAsset();
   if (base && Math.abs(nextAspect - lastViewportAspect) > 0.08) {
@@ -2084,6 +2282,7 @@ function animate() {
   if (state.mixer) state.mixer.update(delta);
   updateRootGizmoPosition();
   controls.update();
+  updateNavigationGizmo();
 
   if (state.currentAction && state.previewClip && !state.isScrubbing) {
     const duration = Math.max(state.previewClip.duration, 0.001);
