@@ -17,6 +17,7 @@ const els = {
   actionSearch: $('#actionSearch'),
   selectAllActionsBtn: $('#selectAllActionsBtn'),
   deselectEmptyActionsBtn: $('#deselectEmptyActionsBtn'),
+  renameCompatibleActionsBtn: $('#renameCompatibleActionsBtn'),
   viewport: $('#viewport'),
   viewportEmpty: $('#viewportEmpty'),
   baseBadge: $('#baseBadge'),
@@ -186,6 +187,23 @@ function compatibility(record, baseAsset) {
   };
 }
 
+function isFullyCompatible(record, baseAsset = getBaseAsset()) {
+  if (!baseAsset || isEmptyClip(record)) return false;
+  const result = compatibility(record, baseAsset);
+  return result.total > 0 && result.matched === result.total;
+}
+
+function getFullyCompatibleClips(baseAsset = getBaseAsset()) {
+  if (!baseAsset) return [];
+  return state.clips.filter((record) => isFullyCompatible(record, baseAsset));
+}
+
+function sourceFileToActionName(sourceFile) {
+  return stripExt(sourceFile)
+    .trim()
+    .replace(/\s+/g, '_');
+}
+
 function makeClipForBase(record, baseAsset, usedNames = null) {
   const clip = record.clip.clone();
   let exportName = (record.name || record.clip?.name || record.originalName || 'Action').trim() || 'Action';
@@ -297,7 +315,9 @@ function renderActions() {
   const emptyActions = filtered.filter((record) => isEmptyClip(record));
   const visible = [...usefulActions, ...emptyActions];
 
-  els.actionCount.textContent = String(state.clips.length);
+  const compatibleCount = getFullyCompatibleClips(base).length;
+  els.actionCount.textContent = String(compatibleCount);
+  els.actionCount.title = compatibleCount + ' action' + (compatibleCount === 1 ? '' : 's') + ' 100% compatible' + (compatibleCount === 1 ? '' : 's');
   els.actionList.innerHTML = '';
   els.actionList.classList.toggle('empty-list', visible.length === 0);
 
@@ -870,6 +890,37 @@ els.deselectEmptyActionsBtn.addEventListener('click', () => {
       ? 'Se desmarcaron ' + changed + ' action' + (changed === 1 ? '' : 's') + ' sin tracks.'
       : 'No había actions sin tracks seleccionadas.',
     changed ? 'ok' : 'info'
+  );
+});
+
+els.renameCompatibleActionsBtn.addEventListener('click', () => {
+  const base = getBaseAsset();
+  if (!base) {
+    setStatus('Selecciona primero un modelo base.', 'warn');
+    return;
+  }
+
+  const compatible = getFullyCompatibleClips(base);
+  if (!compatible.length) {
+    setStatus('No hay Actions 100% compatibles para renombrar.', 'warn');
+    return;
+  }
+
+  compatible.forEach((record) => {
+    const nextName = sourceFileToActionName(record.sourceFile) || record.name || record.originalName || 'Action';
+    record.name = nextName;
+    record.clip.name = nextName;
+  });
+
+  const active = state.clips.find((record) => record.id === state.activeClipId);
+  if (active) {
+    els.activeActionBadge.textContent = active.name;
+  }
+
+  renderActions();
+  setStatus(
+    'Renombradas ' + compatible.length + ' Actions 100% compatibles usando el nombre de su FBX.',
+    'ok'
   );
 });
 els.fitCameraBtn.addEventListener('click', () => {
