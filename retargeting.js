@@ -928,18 +928,24 @@ export async function buildRetargetClip({
       ));
     }
 
-    if (!channels.has('scale')) {
-      const sc = rest.localScale;
-      tracks.push(new THREE.VectorKeyframeTrack(
-        boneName + '.scale',
-        baselineTimes,
-        [sc.x, sc.y, sc.z, sc.x, sc.y, sc.z]
-      ));
-    }
+    // IMPORTANT: do not bake a constant .scale baseline here.
+    // CloudRig/Rigify/ARP FBX exports commonly use inverse-bind/control scales
+    // such as 0.01/100 that are not the animation hierarchy scale. Writing
+    // those values into an AnimationClip is what made retarget results become
+    // gigantic. Position/quaternion are isolated; scale stays owned by the
+    // imported Target FBX hierarchy.
   }
 
   const clip = new THREE.AnimationClip(clipName, duration, tracks);
   clip.resetDuration();
+
+  const fkRequestedPairs = normalizedPairs.filter((pair) =>
+    /^fk[-_:]/i.test(String(pair.target || '').trim())
+  ).length;
+
+  const fkResolvedPairs = runtimePairs.filter((pair) =>
+    /^fk[-_:]/i.test(String(pair.requestedTargetName || '').trim())
+  ).length;
 
   return {
     clip,
@@ -962,7 +968,9 @@ export async function buildRetargetClip({
       weightedTargetBoneCount: weightedTargetBones.size,
       influentialTargetBoneCount: influentialTargetBones.size,
       restBaselineBoneCount: influentialTargetBones.size,
-      restBaselineMode: 'bind-pose',
+      restBaselineMode: 'bind-pose-no-scale',
+      fkRequestedPairs,
+      fkResolvedPairs,
       ikBakedChains: ikBake.chains.length,
       ikSkippedChains: ikBake.skipped,
     },
