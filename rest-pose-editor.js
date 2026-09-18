@@ -832,7 +832,10 @@ export class RestPoseEditor {
     if (!this.sourceBones.size) return;
 
     const sourceHeight = Math.max(
-      computeBoneHeight(this.sourceBones) * this.displayScaleRatio,
+      computeBoneHeight(
+        this.sourceBones,
+        chooseDisplayBoneSet(this.sourceBones)
+      ) * this.displayScaleRatio,
       0.1
     );
 
