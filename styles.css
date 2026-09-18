@@ -289,6 +289,11 @@ button { color: inherit; }
   background: #242b34;
   color: var(--text);
 }
+.rename-compatible-button {
+  grid-column: 1 / -1;
+  border-color: #46515e;
+  color: var(--text);
+}
 .action-list { padding-right: 2px; }
 .action-group-divider {
   position: sticky;
@@ -420,6 +425,7 @@ button { color: inherit; }
   .playback { grid-template-columns: 34px 1fr; }
   .speed-control { grid-column: 1 / -1; justify-content: flex-end; }
   .action-bulk-controls { grid-template-columns: 1fr; }
+  .rename-compatible-button { grid-column: auto; }
   .action-top { grid-template-columns: 30px minmax(0,1fr) auto; }
   .action-rename { grid-column: 2; justify-self: start; }
   .include-toggle { grid-column: 3; grid-row: 1 / span 2; }
