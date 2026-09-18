@@ -1031,6 +1031,33 @@ function buildCleanExportRoot(base, clips) {
   return exportRoot;
 }
 
+function rebuildExportBindPose(exportRoot) {
+  // The FBX exporter derives BindPose / TransformLink from skeleton.boneInverses
+  // and SkinnedMesh.bindMatrix. After changing the root orientation, the cloned
+  // skin still contains the inverses from the pre-rotation space. Rebind every
+  // SkinnedMesh in the final export space so Rest Position and Pose Position
+  // agree in Blender/Unity.
+  exportRoot.updateMatrixWorld(true);
+
+  const reboundSkeletons = new Set();
+
+  exportRoot.traverse((node) => {
+    if (!node.isSkinnedMesh || !node.skeleton) return;
+
+    // Recalculate the inverse bind matrices from the current rest pose once
+    // per skeleton, then bind this mesh using its current world transform.
+    if (!reboundSkeletons.has(node.skeleton)) {
+      node.skeleton.calculateInverses();
+      reboundSkeletons.add(node.skeleton);
+    }
+
+    node.bind(node.skeleton, node.matrixWorld.clone());
+    node.skeleton.update();
+  });
+
+  exportRoot.updateMatrixWorld(true);
+}
+
 function applyFbxArmatureOrientationFix(exportRoot, preset) {
   // IMPORTANT:
   // Unity's FBX importer already handles the Y-up FBX orientation correctly.
@@ -1093,6 +1120,7 @@ async function exportFBX() {
     const exportRoot = buildCleanExportRoot(base, clips);
     const preset = els.presetSelect.value;
     applyFbxArmatureOrientationFix(exportRoot, preset);
+    rebuildExportBindPose(exportRoot);
     const exporter = new FBXExporter();
 
     // FBXLoader conserva las unidades numéricas del archivo de origen.
@@ -1115,7 +1143,7 @@ async function exportFBX() {
     downloadBlob(blob, filename);
 
     setStatus(
-      'FBX exportado con retarget de rest pose y orientación específica del destino (' +
+      'FBX exportado con bind pose reconstruido, retarget de rest pose y orientación específica del destino (' +
       sourceUnitScale + '): ' + filename + ' · ' + clips.length + ' actions.',
       'ok'
     );
