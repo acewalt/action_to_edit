@@ -2223,11 +2223,32 @@ els.viewAxisButtons.forEach((button) => {
 
 els.fitCameraBtn.addEventListener('click', () => {
   const base = getBaseAsset();
-  if (base) {
-    normalizePreview(base.object);
-    fitCameraToObject(base.object);
-    setStatus('Vista previa reencuadrada.', 'ok');
-  }
+  if (!base) return;
+
+  // "Encuadrar" funciona como Home Frame de Blender:
+  // vuelve SIEMPRE a la perspectiva original del visor y después encuadra.
+  normalizePreview(base.object);
+
+  setActiveCamera('perspective', { preserveView: false });
+
+  const target = controls.target.clone();
+  const originalDirection = new THREE.Vector3(0.32, 0.12, 1).normalize();
+  let distance = perspectiveCamera.position.distanceTo(target);
+  if (!Number.isFinite(distance) || distance < 0.01) distance = 5;
+
+  perspectiveCamera.up.set(0, 1, 0);
+  perspectiveCamera.position.copy(target).addScaledVector(originalDirection, distance);
+  perspectiveCamera.lookAt(target);
+  perspectiveCamera.updateMatrixWorld(true);
+
+  controls.object = perspectiveCamera;
+  controls.target.copy(target);
+  controls.update();
+
+  fitCameraToObject(base.object);
+  updateNavigationGizmo();
+
+  setStatus('Vista restablecida: perspectiva original y modelo encuadrado.', 'ok');
 });
 els.toggleSkeletonBtn.addEventListener('click', () => {
   state.skeletonVisible = !state.skeletonVisible;
