@@ -962,6 +962,7 @@ export async function buildRetargetClip({
       weightedTargetBoneCount: weightedTargetBones.size,
       influentialTargetBoneCount: influentialTargetBones.size,
       restBaselineBoneCount: influentialTargetBones.size,
+      restBaselineMode: 'bind-pose',
       ikBakedChains: ikBake.chains.length,
       ikSkippedChains: ikBake.skipped,
     },
@@ -1595,42 +1596,73 @@ function restoreHierarchySnapshot(root, snapshot) {
 function restoreAssetRest(root, asset) {
   if (!root || !asset) return;
 
-  // Blender retargeting works from the armature's edit/rest hierarchy, not
-  // from a reconstruction of the mesh inverse-bind matrices. FBX control rigs
-  // can legitimately have skin bind space that differs from the transforms
-  // their Actions were authored against. The exact FBXLoader import snapshot
-  // is therefore our authoritative animation rest.
-  const restored = restoreHierarchySnapshot(
+  // RETARGET REST != normal Action playback baseline.
+  //
+  // Existing FBX Actions are previewed against the exact hierarchy imported
+  // by FBXLoader (app.js). Retargeting, however, must start from the actual
+  // unanimated bind/rest skeleton — the same state shown by Redefine Rest Pose.
+  //
+  // This separation is intentional:
+  //   normal Action playback -> imported animation hierarchy
+  //   retarget bake          -> true bind/rest pose
+  //
+  // A Blender/CloudRig FBX can be exported while the armature is left in the
+  // last pose of an Action (for example "fail"). If we use that imported pose
+  // as the retarget baseline, every new Action is baked ON TOP of the ending
+  // pose of that Action. That is exactly the failure seen in the viewport.
+  restoreHierarchySnapshot(
     root,
     asset.restHierarchy
   );
 
-  if (!restored && asset.restPose) {
-    applyRestPose(root, asset.restPose);
+  forceBindPose(root);
+
+  root.updateMatrixWorld(true);
+}
+
+function forceBindPose(root) {
+  if (!root) return;
+
+  const skeletons = new Set();
+
+  root.traverse((node) => {
+    if (node.isSkinnedMesh && node.skeleton) {
+      skeletons.add(node.skeleton);
+    }
+  });
+
+  for (const skeleton of skeletons) {
+    try {
+      skeleton.pose();
+    } catch {
+      // Keep the restored hierarchy for malformed / incomplete skeletons.
+    }
   }
 
   root.updateMatrixWorld(true);
 
-  root.traverse((node) => {
-    if (node.isSkinnedMesh && node.skeleton) {
-      node.skeleton.update();
-    }
-  });
+  for (const skeleton of skeletons) {
+    skeleton.update();
+  }
 }
 
 function applyRestPose(object, restPose) {
-  if (!object || !restPose) return;
+  if (!object) return;
 
-  object.traverse((node) => {
-    if (!node.isBone || !node.name) return;
+  forceBindPose(object);
 
-    const rest = restPose.get(node.name);
-    if (!rest) return;
+  if (restPose) {
+    object.traverse((node) => {
+      if (!node.isBone || !node.name) return;
 
-    node.position.copy(rest.position);
-    node.quaternion.copy(rest.quaternion);
-    node.scale.copy(rest.scale);
-  });
+      const rest = restPose.get(node.name);
+      if (!rest) return;
+
+      node.position.copy(rest.position);
+      node.quaternion.copy(rest.quaternion);
+      node.scale.copy(rest.scale);
+    });
+  }
 
   object.updateMatrixWorld(true);
 
